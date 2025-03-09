@@ -1,4 +1,5 @@
 import fetch
+from dateutil import parser as dateutil_parser
 def parse_weather_data():
     weather = fetch.fetch_weather_data()
     try:
@@ -12,26 +13,20 @@ def parse_weather_data():
 
 def parse_air_quality_data():
     try:
-        air_quality = fetch.fetch_air_quality_data()
-        pm_data = {"pm10": None, "pm25": None}
-        sensors = air_quality["results"][0].get("sensors", [])
-        for sensor in sensors:
-            param = sensor.get("parameter", {}).get("name", "").lower()
-            if param in pm_data:
-                pm_data[param] = {
-                    "sensor_id": sensor.get("id"),
-                    "name": sensor.get("name"),
-                    "units": sensor.get("parameter", {}).get("units"),
-                    "displayName": sensor.get("parameter", {}).get("displayName")
-                }
-        return pm_data
+        pm_data = fetch.fetch_air_quality_data()
+        local_dt_str = pm_data["results"][0]["period"]["datetimeTo"]["local"]
+        local_dt = dateutil_parser.isoparse(local_dt_str).replace(tzinfo=None)
+        value = {
+            "ds": local_dt.isoformat(),
+            "y": pm_data["results"][0]["value"]
+        }
+        return value
     except Exception as e:
         return {"error": str(e)}
-    
 
 def main():
     parse_weather_data()
     parse_air_quality_data()
-
+    
 if __name__ == "__main__":
     main()

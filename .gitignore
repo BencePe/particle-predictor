@@ -146,7 +146,14 @@ venv.bak/
 # mkdocs documentation
 /site
 
-# mypy
+# PyBuilder
+.pybuilder/
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Mypy
 .mypy_cache/
 .dmypy.json
 dmypy.json
@@ -172,3 +179,9 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Database file
+data.db
+
+# Ignore CSV files
+*.csv
