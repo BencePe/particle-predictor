@@ -6,7 +6,7 @@ OPENAQ_API_KEY = "568eaee503e6178c9b3a6951a9e5941245040a6ffdf1eb334ab725cd1608d0
 WEATHER_URL = f"http://api.openweathermap.org/data/2.5/weather?q=Debrecen,hu&appid={OPENWEATHER_API_KEY}&units=metric"
 
 def set_date():
-    #TODO: date_to and date_from needs to be defined in relation to datetime 
+    #TODO: date_to and date_from needs to be defined in relation to current time 
     return date_to , date_from
    
 def fetch_weather_data():
