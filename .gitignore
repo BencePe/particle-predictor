@@ -1,3 +1,5 @@
+models/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -182,6 +184,7 @@ cython_debug/
 
 # Database file
 data.db
+.cache.sqlite
 
 # Ignore CSV files
 *.csv
