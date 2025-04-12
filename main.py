@@ -1,14 +1,15 @@
+#!/usr/bin/env python3
 """
 Main entry point for the PM10 prediction application.
 
 Menu Options:
     1. Build model for 2024
-         - Builds the model from scratch using historical Open-Meteo data for 2024.
+         - Build the model from scratch using historical Open-Meteo data for 2024.
          - The model files are stored locally.
     2. Fetch current sensor data
-         - Starts continuous tracking of current sensor readings and uploads to database
-    3. Compute hourly means
-         - Process current sensor data and save hourly averages to air_quality_2025.
+         - Starts continuous tracking of current sensor readings and uploads to database.
+    3. Query top 100 records from a specified table
+         - Prompts the user for a table name and retrieves the latest 100 entries (ordered by datetime descending).
     4. Exit
          - Quit the application.
 
@@ -18,9 +19,13 @@ After completing a task, the menu is displayed again.
 import os
 import sys
 import logging
-from datetime import datetime
-from pyspark.sql import SparkSession
 import time
+from datetime import datetime
+import pandas as pd
+import requests
+import pytz
+
+from pyspark.sql import SparkSession
 
 # Set the Python executables for Spark
 os.environ["PYSPARK_PYTHON"] = sys.executable
@@ -35,7 +40,7 @@ if src_path not in sys.path:
     sys.path.insert(0, src_path)
 
 # Import project modules
-from db_operations import check_db_ready
+from db_operations import check_db_ready, execute_db_query
 from utils import setup_logging, create_spark_session, cleanup_resources
 from data_fetching import fetch_debrecen_data, fetch_current_data
 from model_building import build_rf_model_pipeline, train_model, evaluate_model, save_model, plot_predictions
@@ -84,9 +89,10 @@ def build_model_for_2024(spark):
     except Exception as e:
         logger.error(f"Error building model for 2024: {str(e)}")
 
+
 def fetch_current_sensor_data(spark):
     """
-    Starts continuous tracking of current sensor data and uploads to database
+    Starts continuous tracking of current sensor data and uploads to database.
     """
     logger.info("Starting current data tracking...")
     try:
@@ -109,16 +115,39 @@ def fetch_current_sensor_data(spark):
         logger.error(f"Error in data tracking: {str(e)}")
         return False
 
+
+def query_top_100():
+    """
+    Prompt for a table name, then execute an SQL query to fetch the latest 100 rows from that table.
+    The query orders by 'datetime' in descending order.
+    """
+    table = input("Enter table name (e.g., historical_2024, current): ").strip()
+    query = f"SELECT * FROM {table} ORDER BY datetime DESC LIMIT 100"
+    logger.info(f"Executing query: {query}")
+    
+    results = execute_db_query(query, fetch=True)
+    if results is not None:
+        print("\nLatest 100 records:")
+        for row in results:
+            print(row)
+        print("\nQuery finished.")
+    else:
+        print("Query failed.")
+
+
 def display_menu():
     print("\n==================== PM10 Prediction Pipeline Menu ====================")
     print("1. Build model for 2024")
     print("   - Build the model from scratch using historical Open-Meteo data for 2024.")
     print("2. Fetch current sensor data")
-    print("   - Start continuous tracking and storage of current sensor readings")
-    print("3. Exit")
+    print("   - Start continuous tracking and storage of current sensor readings.")
+    print("3. Query top 100 records from a specified table")
+    print("   - Retrieve the latest 100 records (ordered by datetime) from a user-specified table.")
+    print("4. Exit")
     print("========================================================================")
     choice = input("Enter your choice number: ")
     return choice.strip()
+
 
 def main():
     """
@@ -146,7 +175,11 @@ def main():
                 print(f"\n{message}\nReturning to main menu...")
                 time.sleep(2)
             elif choice == "3":
-                print("Exiting application. Goodbye!")
+                query_top_100()
+                print("\nReturning to main menu...")
+                time.sleep(2)
+            elif choice == "4":
+                print("\nExiting application. Goodbye!")
                 break
             else:
                 print("Invalid selection. Please try again.")
@@ -156,6 +189,7 @@ def main():
         if spark:
             cleanup_resources(spark)
         sys.exit(0)
+
 
 if __name__ == "__main__":
     main()
