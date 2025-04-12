@@ -9,7 +9,13 @@ __pycache__/
 *.so
 
 # Distribution / packaging
+
+
+# RE-ENABLE!!!
+src/config.py
+
 .Python
+tests/
 build/
 develop-eggs/
 dist/

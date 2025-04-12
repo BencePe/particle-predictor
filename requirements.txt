@@ -6,6 +6,11 @@ retry-requests>=0.1.0
 pyspark>=3.5.0
 matplotlib>=3.7.0
 python-dotenv>=1.0.0
+pyserial
+fastapi==0.104.1
+uvicorn==0.23.2
+psycopg2-binary==2.9.9
+pydantic==2.4.2
 
 # Optional (included in PySpark but explicitly listed for clarity)
 py4j>=0.10.9
