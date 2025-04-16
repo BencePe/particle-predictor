@@ -167,23 +167,3 @@ def execute_db_query(query, params=None, fetch=False):
     except Exception as e:
         logger.error(f"Error executing database query: {str(e)}")
         return None
-
-def clear_table(table_name):
-    """
-    Clear all data from a table.
-    
-    Parameters:
-        table_name (str): Name of the table to clear
-        
-    Returns:
-        bool: True if successful, False otherwise
-    """
-    try:
-        query = f"DELETE FROM {table_name}"
-        return execute_db_query(query)
-        
-    except Exception as e:
-        logger.error(f"Error clearing table {table_name}: {str(e)}")
-        return False
-
-        #TODO: -Error handling for table manip

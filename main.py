@@ -8,8 +8,8 @@ Menu Options:
          - The model files are stored locally.
     2. Fetch current sensor data
          - Starts continuous tracking of current sensor readings and uploads to database.
-    3. Query top 100 records from a specified table
-         - Prompts the user for a table name and retrieves the latest 100 entries (ordered by datetime descending).
+    3. Create database query
+         - Prompts the user for a query string to search in raw data.
     4. Exit
          - Quit the application.
 
@@ -116,18 +116,16 @@ def fetch_current_sensor_data(spark):
         return False
 
 
-def query_top_100():
+def interact_with_db():
     """
     Prompt for a table name, then execute an SQL query to fetch the latest 100 rows from that table.
     The query orders by 'datetime' in descending order.
     """
-    table = input("Enter table name (e.g., historical_2024, current): ").strip()
-    query = f"SELECT * FROM {table} ORDER BY datetime DESC LIMIT 100"
+    query = input("Enter your query: ")
     logger.info(f"Executing query: {query}")
     
     results = execute_db_query(query, fetch=True)
     if results is not None:
-        print("\nLatest 100 records:")
         for row in results:
             print(row)
         print("\nQuery finished.")
@@ -141,8 +139,8 @@ def display_menu():
     print("   - Build the model from scratch using historical Open-Meteo data for 2024.")
     print("2. Fetch current sensor data")
     print("   - Start continuous tracking and storage of current sensor readings.")
-    print("3. Query top 100 records from a specified table")
-    print("   - Retrieve the latest 100 records (ordered by datetime) from a user-specified table.")
+    print("3. Create database query.")
+    print("   - View the raw data in the database (...).") #TODO: add table names
     print("4. Exit")
     print("========================================================================")
     choice = input("Enter your choice number: ")
@@ -175,7 +173,7 @@ def main():
                 print(f"\n{message}\nReturning to main menu...")
                 time.sleep(2)
             elif choice == "3":
-                query_top_100()
+                interact_with_db()
                 print("\nReturning to main menu...")
                 time.sleep(2)
             elif choice == "4":
