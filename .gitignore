@@ -10,8 +10,6 @@ __pycache__/
 
 # Distribution / packaging
 
-
-# RE-ENABLE!!!
 src/config.py
 
 .Python
