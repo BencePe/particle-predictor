@@ -53,7 +53,12 @@ def create_spark_session(app_name=None, config_dict=None):
             key_name = f"spark.{key}" if not key.startswith("spark.") else key
             builder = builder.config(key_name, value)
     
-    spark = builder.getOrCreate()
+
+
+    spark = builder \
+        .config("spark.driver.memory", "4g") \
+        .getOrCreate()
+
     logger.info(f"Spark session created: v{spark.version}")
     logger.debug(f"Spark configuration: {spark.sparkContext.getConf().getAll()}")
     return spark
