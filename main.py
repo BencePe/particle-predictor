@@ -1,19 +1,6 @@
 #!/usr/bin/env python3
 """
 Main entry point for the PM10 prediction application.
-
-Menu Options:
-    1. Build model for 2024
-         - Build the model from scratch using historical Open-Meteo data for 2024.
-         - The model files are stored locally.
-    2. Fetch current sensor data
-         - Starts continuous tracking of current sensor readings and uploads to database.
-    3. Create database query
-         - Prompts the user for a query string to search in raw data.
-    4. Exit
-         - Quit the application.
-
-After completing a task, the menu is displayed again.
 """
 
 import os
@@ -24,8 +11,8 @@ from datetime import datetime
 import pandas as pd
 import requests
 import pytz
-
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
 
 # Set the Python executables for Spark
 os.environ["PYSPARK_PYTHON"] = sys.executable
@@ -42,46 +29,33 @@ if src_path not in sys.path:
 # Import project modules
 from db_operations import check_db_ready, execute_db_query
 from utils import setup_logging, create_spark_session, cleanup_resources
-from data_fetching import fetch_debrecen_data, fetch_current_data
-from model_building import build_rf_model_pipeline, train_model, evaluate_model, save_model, plot_predictions
+from data_fetching import fetch_debrecen_data, fetch_current_data, get_prediction_input_data
+from model_building import (
+    build_rf_model_pipeline,
+    train_model,
+    evaluate_model,
+    save_model,
+    load_model,
+    plot_predictions,
+)
 from data_processing import add_urban_features, validate_data, prepare_training_data
+from config import MODEL_DIR
 
 logger = setup_logging(logging.INFO)
 
 def build_model_for_2024(spark):
-    """
-    Build the model for 2024 using historical Open-Meteo data.
-    
-    Steps:
-      - Fetch data for Debrecen.
-      - Process the data.
-      - Train a Random Forest model.
-      - Evaluate and save the model.
-    """
     logger.info("Starting model training for 2024...")
-    
     try:
-        # Fetch historical data and add urban features
         df = fetch_debrecen_data(spark)
         df = add_urban_features(df)
-        
-        # Optionally validate and prepare the data
         if not validate_data(df):
             logger.error("Data validation failed.")
             return
-        
-        # For simplicity, we use the whole dataset as training data.
         train_df, _ = prepare_training_data(df, test_ratio=0.2)
-        
-        # Build the Random Forest pipeline and train the model
-        pipeline, features = build_rf_model_pipeline()
+        pipeline, _ = build_rf_model_pipeline()
         model = train_model(pipeline, train_df)
-        
-        # Evaluate the model (using training data as a placeholder)
         metrics = evaluate_model(model, train_df)
         logger.info(f"Evaluation Metrics: {metrics}")
-        
-        # Generate prediction plot and save model locally
         predictions = model.transform(train_df)
         plot_predictions(predictions)
         model_path = save_model(model, model_name="pm10_rf_model")
@@ -89,11 +63,23 @@ def build_model_for_2024(spark):
     except Exception as e:
         logger.error(f"Error building model for 2024: {str(e)}")
 
+def predict_future_air_quality(spark, model):
+    try:
+        input_df = get_prediction_input_data(spark)
+        if input_df is None:
+            logger.error("No input data available for prediction.")
+            return None
+        full_predictions = model.transform(input_df)
+        full_predictions.show(10)
+        future_predictions = full_predictions.filter(col("is_future") == True)
+        logger.info("Future air quality predictions generated successfully.")
+        future_predictions.show(10)
+        return future_predictions
+    except Exception as e:
+        logger.error(f"Error predicting future air quality: {str(e)}")
+        return None
 
 def fetch_current_sensor_data(spark):
-    """
-    Starts continuous tracking of current sensor data and uploads to database.
-    """
     logger.info("Starting current data tracking...")
     try:
         while True:
@@ -103,11 +89,8 @@ def fetch_current_sensor_data(spark):
                 logger.info(f"Successfully saved {df.count()} current readings")
             else:
                 logger.warning("No new data fetched in this cycle")
-            
-            # Wait before next fetch (15 seconds)
             logger.info("Next update in 15 seconds...")
             time.sleep(15)
-            
     except KeyboardInterrupt:
         logger.info("Stopping data tracking...")
         return True
@@ -115,15 +98,9 @@ def fetch_current_sensor_data(spark):
         logger.error(f"Error in data tracking: {str(e)}")
         return False
 
-
 def interact_with_db():
-    """
-    Prompt for a table name, then execute an SQL query to fetch the latest 100 rows from that table.
-    The query orders by 'datetime' in descending order.
-    """
     query = input("Enter your query: ")
     logger.info(f"Executing query: {query}")
-    
     results = execute_db_query(query, fetch=True)
     if results is not None:
         for row in results:
@@ -132,6 +109,33 @@ def interact_with_db():
     else:
         print("Query failed.")
 
+def load_latest_model_path(model_dir=MODEL_DIR):
+    try:
+        model_folders = [
+            f for f in os.listdir(model_dir)
+            if os.path.isdir(os.path.join(model_dir, f)) and "pm10_rf_model" in f
+        ]
+        if not model_folders:
+            logger.error("No model found in the model directory.")
+            return None
+        latest_model = sorted(model_folders)[-1]
+        return os.path.join(model_dir, latest_model)
+    except Exception as e:
+        logger.error(f"Failed to find latest model: {str(e)}")
+        return None
+
+def predict_with_latest_model(spark):
+    logger.info("Loading latest model for prediction...")
+    model_path = load_latest_model_path()
+    if not model_path:
+        logger.error("Prediction aborted. No model available.")
+        return
+    try:
+        model = load_model(model_path)
+        logger.info(f"Model loaded from {model_path}")
+        predict_future_air_quality(spark, model)
+    except Exception as e:
+        logger.error(f"Failed to load and predict: {str(e)}")
 
 def display_menu():
     print("\n==================== PM10 Prediction Pipeline Menu ====================")
@@ -140,26 +144,20 @@ def display_menu():
     print("2. Fetch current sensor data")
     print("   - Start continuous tracking and storage of current sensor readings.")
     print("3. Create database query.")
-    print("   - View the raw data in the database (...).") #TODO: add table names
+    print("   - View the raw data in the database.")
     print("4. Exit")
+    print("5. Load latest model and predict air quality")
     print("========================================================================")
     choice = input("Enter your choice number: ")
     return choice.strip()
 
-
 def main():
-    """
-    Main function: creates Spark session, displays menu, and executes user's choices.
-    """
     spark = None
     try:
         spark = create_spark_session()
-        
-        # Check database connectivity
         if not check_db_ready():
             logger.error("Database is not available. Exiting...")
             sys.exit(1)
-            
         while True:
             choice = display_menu()
             if choice == "1":
@@ -179,6 +177,10 @@ def main():
             elif choice == "4":
                 print("\nExiting application. Goodbye!")
                 break
+            elif choice == "5":
+                predict_with_latest_model(spark)
+                print("\nReturning to main menu...")
+                time.sleep(2)
             else:
                 print("Invalid selection. Please try again.")
     except Exception as e:
@@ -187,7 +189,6 @@ def main():
         if spark:
             cleanup_resources(spark)
         sys.exit(0)
-
 
 if __name__ == "__main__":
     main()

@@ -18,6 +18,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import lit, col, date_trunc, avg, to_timestamp
 from pyspark.sql.types import TimestampType
 from pyspark import StorageLevel
+from pyspark.ml import PipelineModel
 
 from config import (
     DEBRECEN_LAT, DEBRECEN_LON, DEBRECEN_ELEVATION, 
@@ -542,36 +543,38 @@ def get_prediction_input_data(spark):
         logger.error(f"Error fetching prediction input data: {str(e)}")
         return None
 
-
-def predict_future_air_quality(spark, model):
+def predict_future_air_quality(spark: SparkSession, model: PipelineModel):
     """
-    Use the provided Spark ML model (trained on 2024 data) to forecast PM10 and PM2.5 levels.
-    The model is applied to a combined dataset that includes the past 31 days of historical data
-    (with measurements) and the next 7 days of forecast weather predictors.
+    Use the provided Spark ML model to forecast PM10 and PM2.5 levels.
+    The model is applied to a combined dataset of historical air quality data and
+    forecasted weather data for the next 7 days.
     
-    The resulting predictions for future timestamps (where 'is_future' is True) are returned.
+    Only rows where 'is_future' == True are returned as future predictions.
 
     Parameters:
-        spark: SparkSession object.
-        model: Trained Spark ML PipelineModel.
+        spark (SparkSession): Active Spark session.
+        model (PipelineModel): Trained Spark ML model.
 
     Returns:
-        Spark DataFrame: Rows corresponding to future timestamps with predicted PM10 and PM2.5.
+        DataFrame: Predictions for future timestamps.
     """
     try:
+        # Fetch and prepare the input data
         input_df = get_prediction_input_data(spark)
-        if input_df is None:
+        if input_df is None or input_df.rdd.isEmpty():
             logger.error("No input data available for prediction.")
             return None
-        
-        # Apply the model to generate predictions over all timestamps
+
+        # Generate predictions
         full_predictions = model.transform(input_df)
-        full_predictions.show(10)
-        
-        # Filter the predictions to get only future (forecast) rows
+        logger.info("All predictions generated successfully.")
+        full_predictions.show(10, truncate=False)
+
+        # Filter for future predictions only
         future_predictions = full_predictions.filter(col("is_future") == True)
-        logger.info("Future air quality predictions generated successfully.")
-        future_predictions.show(10)
+        logger.info("Future air quality predictions extracted successfully.")
+        future_predictions.show(10, truncate=False)
+
         return future_predictions
 
     except Exception as e:

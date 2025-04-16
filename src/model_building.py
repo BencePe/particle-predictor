@@ -7,7 +7,7 @@ import logging
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-from pyspark.ml import Pipeline
+from pyspark.ml import Pipeline, PipelineModel
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.regression import GBTRegressor, RandomForestRegressor
 from pyspark.ml.evaluation import RegressionEvaluator
@@ -201,3 +201,22 @@ def plot_predictions(predictions, sample_size=100, save_path=None):
     except Exception as e:
         logger.error(f"Error creating prediction plot: {str(e)}")
         return None
+
+def load_model(model_path):
+    """
+    Load a previously saved model from disk.
+    
+    Parameters:
+        model_path (str): Path to the saved model directory
+        
+    Returns:
+        PipelineModel: Loaded trained model
+    """
+    if not os.path.exists(model_path):
+        logger.error(f"Model path does not exist: {model_path}")
+        raise FileNotFoundError(f"No model found at: {model_path}")
+
+    logger.info(f"Loading model from: {model_path}")
+    model = PipelineModel.load(model_path)
+    logger.info("Model loaded successfully")
+    return model
