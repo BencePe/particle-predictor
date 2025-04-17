@@ -1,53 +1,18 @@
-from src.config.config_manager import get_config
-"""
+from config import FEATURE_COLUMNS
 
+"""
 Data processing and feature engineering functions.
 """
 
 import logging
-from pyspark.sql.utils import AnalysisException
 from pyspark.sql.functions import *
 from pyspark.sql.window import Window
 
 logger = logging.getLogger(__name__)
-config = get_config()
-
-def _add_base_features(df, wind_directions=8, wind_speed_low=2, wind_speed_medium=5, wind_speed_high=10):
-    """
-    Add base features common to both historical and future data.
-    
-    Parameters:
-        df: Spark DataFrame
-    Returns:
-        DataFrame: Enhanced DataFrame with additional base features.
-    """
-    logger.info("Adding base features...")
-    try:
-        # Temporal features
-        df = df.withColumn("year", year("datetime")) \
-               .withColumn("month", month("datetime")) \
-               .withColumn("hour", hour("datetime")) \
-               .withColumn("day_of_week", dayofweek("datetime")) \
-               .withColumn("is_weekend", when((col("day_of_week") == 1) | (col("day_of_week") == 7), 1).otherwise(0))
-
-        # Wind features
-        df = df.withColumn(f"wind_dir_{wind_directions}", ((col("wind_dir") + (360 / wind_directions / 2)) % 360 / (360 / wind_directions)).cast("int")) \
-               .withColumn("wind_speed_cat", 
-                           when(col("wind_speed") < wind_speed_low, 0)
-                           .when(col("wind_speed") < wind_speed_medium, 1)
-                           .when(col("wind_speed") < wind_speed_high, 2)
-                           .otherwise(3))
-        return df
-    except Exception as e:
-        logger.error(f"Error during adding base features: {e}")
-        raise
 
 
 
-
-def add_urban_features(df, lag_hours=24, window_7d_size=168, window_24h_size=24, 
-                       wind_directions=8, wind_speed_low=2, wind_speed_medium=5, 
-                       wind_speed_high=10):
+def add_urban_features(df):
     """
     Add engineered features to the DataFrame for urban PM10 prediction (historical data only).
     Parameters:
@@ -57,23 +22,33 @@ def add_urban_features(df, lag_hours=24, window_7d_size=168, window_24h_size=24,
     """
     logger.info("Adding urban features and calculating derived metrics...")
     try:
-        df = _add_base_features(df, wind_directions, wind_speed_low, wind_speed_medium, wind_speed_high)
-       # Window specs for time-based aggregations with configurable sizes
-        window_lag_24h = Window.partitionBy("year", "month").orderBy("datetime")
-        window_24h_avg = Window.partitionBy("year", "month").orderBy("datetime").rowsBetween(-window_24h_size, 0)
-        window_7d_avg = Window.partitionBy("year", "month").orderBy("datetime").rowsBetween(-window_7d_size, 0)
+        # Temporal features
+        df = df.withColumn("year", year("datetime")) \
+               .withColumn("month", month("datetime")) \
+               .withColumn("hour", hour("datetime")) \
+               .withColumn("day_of_week", dayofweek("datetime")) \
+               .withColumn("is_weekend", when((col("day_of_week") == 1) | (col("day_of_week") == 7), 1).otherwise(0))
 
+        # Window specs for time-based aggregations
+        window_lag_24h = Window.partitionBy("year", "month").orderBy("datetime")
+        window_24h_avg = Window.partitionBy("year", "month").orderBy("datetime").rowsBetween(-24, 0)
+        window_7d_avg = Window.partitionBy("year", "month").orderBy("datetime").rowsBetween(-168, 0)
 
         # Window-based features
-        df = df.withColumn("pm10_lag24", lag("pm10", lag_hours).over(window_lag_24h)) \
+        df = df.withColumn("pm10_lag24", lag("pm10", 24).over(window_lag_24h)) \
                .withColumn("weekly_pm10_avg", avg("pm10").over(window_7d_avg)) \
                .withColumn("pressure_trend", avg("pressure").over(window_24h_avg) - col("pressure"))
 
-        
+        # Wind features
+        df = df.withColumn("wind_dir_8", ((col("wind_dir") + 22.5) % 360 / 45).cast("int")) \
+               .withColumn("wind_speed_cat", 
+                           when(col("wind_speed") < 2, 0)
+                           .when(col("wind_speed") < 5, 1)
+                           .when(col("wind_speed") < 10, 2)
+                           .otherwise(3))
+
         # Pollution features
-        if "pm2_5" not in df.columns or "pm10" not in df.columns or "wind_speed" not in df.columns:
-            raise ValueError("Missing required columns for pollution features: pm2_5, pm10, wind_speed")
-        df = df.withColumn("pm_ratio", col("pm2_5")/(col("pm10") + 1e-7)) \ 
+        df = df.withColumn("pm_ratio", col("pm2_5")/(col("pm10") + 1e-7)) \
                .withColumn("pollution_load", col("pm10") * col("wind_speed"))
 
         # Fill missing values and drop unnecessary columns
@@ -84,14 +59,9 @@ def add_urban_features(df, lag_hours=24, window_7d_size=168, window_24h_size=24,
         logger.info("Urban feature engineering completed successfully")
         return df
 
-    except AnalysisException as e:
-        logger.error(f"Spark AnalysisException during urban feature engineering: {e}")
+    except Exception as e:
+        logger.error(f"Error during urban feature engineering: {e}")
         raise
-    except (TypeError, ZeroDivisionError, ValueError) as e:
-        logger.error(f"Error during urban feature engineering. Ensure correct column types and values: {e}")
-        logger.error(f"Columns: {df.columns}")
-        raise
-
 
 
 def add_unified_features(df):
@@ -109,18 +79,24 @@ def add_unified_features(df):
     try:
         historical_df = df.filter(col("is_future") == False)
         future_df = df.filter(col("is_future") == True)
-        
+
         # Process historical data (requires PM columns)
         if historical_df.count() > 0:
             logger.info("Processing historical data with full urban feature set")
-            historical_df = add_urban_features(historical_df, lag_hours=24, window_7d_size=168, window_24h_size=24,
-                                               wind_directions=8, wind_speed_low=2, wind_speed_medium=5,
-                                               wind_speed_high=10)
+            historical_df = add_urban_features(historical_df)
 
         # Process future data (limited features)
         if future_df.count() > 0:
             logger.info("Processing future data with limited feature set")
-            future_df = _add_base_features(future_df)
+            # Temporal features
+            future_df = future_df.withColumn("year", year("datetime")) \
+                                 .withColumn("month", month("datetime")) \
+                                 .withColumn("hour", hour("datetime")) \
+                                 .withColumn("day_of_week", dayofweek("datetime")) \
+                                 .withColumn("is_weekend", when((col("day_of_week") == 1) | (col("day_of_week") == 7), 1).otherwise(0))
+
+            # Wind features
+            future_df = future_df.withColumn("wind_dir_8", ((col("wind_dir") + 22.5) % 360 / 45).cast("int")) \
                                  .withColumn("wind_speed_cat", 
                                             when(col("wind_speed") < 2, 0)
                                             .when(col("wind_speed") < 5, 1)
@@ -132,12 +108,9 @@ def add_unified_features(df):
             future_df = future_df.withColumn("pressure_trend", avg("pressure").over(window_24h_avg) - col("pressure"))
 
             # Fill PM-dependent features from latest historical snapshot
-            if historical_df.count() > 0:    
+            if historical_df.count() > 0:
                 latest = historical_df.orderBy(desc("datetime")).limit(1).collect()[0].asDict()
                 lp10 = latest["pm10"]
-                if lp10 is None:
-                    raise ValueError("latest[\"pm10\"] is None")
-
                 lag24 = latest.get("pm10_lag24", lp10)
                 week_avg = latest.get("weekly_pm10_avg", lp10)
                 p25 = latest.get("pm2_5", 0)
@@ -166,12 +139,8 @@ def add_unified_features(df):
         logger.info("Unified feature engineering completed successfully")
         return result_df
 
-    except AnalysisException as e:
-        logger.error(f"Spark AnalysisException during unified feature engineering: {e}")
-        raise
-    except (TypeError, ZeroDivisionError, ValueError) as e:
-        logger.error(f"Error during unified feature engineering. Ensure correct column types and values: {e}")
-        logger.error(f"Columns: {df.columns}")
+    except Exception as e:
+        logger.error(f"Error during unified feature engineering: {e}")
         raise
 
 def validate_data(df):
