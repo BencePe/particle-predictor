@@ -74,20 +74,43 @@ def get_runtime_stats(spark):
         "driver_memory": spark.sparkContext.getConf().get("spark.driver.memory")
     }
 
-def cleanup_resources(spark, temp_files=None):
+def cleanup_resources(logger, spark, temp_files=None):
+    """Clean up resources when the application is done.
+
+    This function handles the cleanup of temporary files and stops
+    the Spark session to release resources.
+
+    Args:
+        logger (logging.Logger): The logger instance to use for logging.
+        spark (SparkSession, optional): The Spark session to stop. Defaults to None.
+        temp_files (list, optional): A list of file paths of temporary files to remove.
+            Defaults to None.
+
+    Raises:
+        FileNotFoundError: If a file does not exist during cleanup.
+        Exception: If there is an error while removing a temporary file.
+
+    Example:
+        >>> cleanup_resources(logger, spark, ['/tmp/temp1.txt', '/tmp/temp2.txt'])
+
+    Note:
+        Logs warnings if a temporary file is not found and logs errors if there is a failure
+        while trying to remove a temporary file.
     """
-    Clean up resources when application is done.
-    """
-    logger = logging.getLogger(__name__)
-    
+    temp_files = temp_files or []
     if temp_files:
-        for file in temp_files:
+        logger.info(f"Cleaning up {len(temp_files)} temporary files...")
+        for file_path in temp_files:
             try:
-                if os.path.exists(file):
-                    os.remove(file)
-                    logger.debug(f"Removed temporary file: {file}")
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    logger.debug(f"Removed temporary file: {file_path}")
+                else:
+                    logger.warning(f"Temporary file not found: {file_path}")
+            except FileNotFoundError:
+                logger.warning(f"File not found during cleanup: {file_path}")
             except Exception as e:
-                logger.warning(f"Failed to remove temporary file {file}: {str(e)}")
+                logger.error(f"Failed to remove temporary file {file_path}: {str(e)}")
     
     if spark:
         logger.info("Stopping Spark session...")

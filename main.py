@@ -49,8 +49,7 @@ logger = setup_logging(logging.INFO)
 def build_model_for_2024(spark):
     logger.info("Starting model training for 2024...")
     try:
-        save = input("Save raw data to db? (y/n): ")
-        if save == 'n':
+        if input("Save raw data to db? (y/n): ") == 'n':
         
             df = assemble_and_pass(spark,'n','save','historical_2024')
             df = add_urban_features(df)
@@ -132,6 +131,41 @@ def interact_with_db():
     else:
         print("Query failed.")
 
+def handle_choice_1(spark):
+    build_model_for_2024(spark)
+    return_to_main_menu()
+
+def handle_choice_2(spark):
+    print("\nStarting continuous data tracking (press Ctrl+C to stop)...")
+    success = fetch_current_sensor_data(spark)
+    message = "Data tracking stopped." if success else "Data tracking failed."
+    print(f"\n{message}")
+    return_to_main_menu()
+
+def handle_choice_3():
+    interact_with_db()
+    return_to_main_menu()
+
+def handle_choice_4(spark):
+    predict_future_pm10(spark)
+    return_to_main_menu()
+
+def handle_choice_5():
+    print("\nExiting application. Goodbye!")
+    return True
+
+def handle_invalid_choice():
+    print("Invalid selection. Please try again.")
+    return False
+
+def return_to_main_menu():
+    print("\nReturning to main menu...")
+    time.sleep(2)
+
+def exit_application(spark, temp_files=None):
+    if spark:
+        cleanup_resources(logger,spark, temp_files)
+    sys.exit(0)
 def load_latest_model_path(model_dir=MODEL_DIR):
     try:
         model_folders = [
@@ -201,41 +235,32 @@ def display_menu():
 def main():
     spark = None
     try:
-        spark = create_spark_session()
-        if not check_db_ready():
-            logger.error("Database is not available. Exiting...")
-            sys.exit(1)
-        while True:
-            choice = display_menu()
-            if choice == "1":
-                build_model_for_2024(spark)
-                print("\nReturning to main menu...")
-                time.sleep(2)
-            elif choice == "2":
-                print("\nStarting continuous data tracking (press Ctrl+C to stop)...")
-                success = fetch_current_sensor_data(spark)
-                message = "Data tracking stopped." if success else "Data tracking failed."
-                print(f"\n{message}\nReturning to main menu...")
-                time.sleep(2)
-            elif choice == "3":
-                interact_with_db()
-                print("\nReturning to main menu...")
-                time.sleep(2)
-            elif choice == "4":
-                predict_future_pm10(spark)
-                print("\nReturning to main menu...")
-                time.sleep(2)
-            elif choice == "5":
-                print("\nExiting application. Goodbye!")
-                break
-            else:
-                print("Invalid selection. Please try again.")
+        try:
+            spark = create_spark_session()
+            if not check_db_ready():
+                logger.error("Database is not available. Exiting...")
+                sys.exit(1)
+            while True:
+                choice = display_menu()
+                if choice == "1":
+                    handle_choice_1(spark)
+                elif choice == "2":
+                    handle_choice_2(spark)
+                elif choice == "3":
+                    handle_choice_3()
+                elif choice == "4":
+                    handle_choice_4(spark)
+                elif choice == "5":
+                    if handle_choice_5():
+                        break
+                else:
+                    handle_invalid_choice()
+        except SystemExit:
+            raise
     except Exception as e:
         logger.error(f"Unhandled exception: {str(e)}")
     finally:
-        if spark:
-            cleanup_resources(spark)
-        sys.exit(0)
+        exit_application(spark)
 
 if __name__ == "__main__":
     main()
