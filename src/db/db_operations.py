@@ -7,8 +7,6 @@ from psycopg2 import sql
 import logging
 import time
 from config import DB_CONFIG
-import configparser
-import os
 
 logger = logging.getLogger(__name__)
 

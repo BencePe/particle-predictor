@@ -7,6 +7,7 @@ import logging
 import matplotlib.pyplot as plt
 from datetime import datetime
 
+import pandas as pd
 from pyspark.ml import Pipeline, PipelineModel
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.regression import GBTRegressor, RandomForestRegressor
@@ -161,62 +162,134 @@ def save_model(model, model_name="pm10_gbt_model"):
     
     return model_path
 
-def plot_predictions(predictions, sample_size=100, save_path=None):
+def plot_predictions(predictions_df):
     """
-    Plot actual vs predicted PM10 values.
+    Plot both historical data and predictions.
     
     Parameters:
-        predictions: DataFrame with predictions
-        sample_size (int): Number of points to plot
-        save_path (str): Path to save the plot image
-        
-    Returns:
-        str: Path to saved plot or None
+        predictions_df: DataFrame with both historical data and predictions
     """
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    from datetime import datetime
+    
     try:
-        # Convert to Pandas for plotting. The sample fraction is the minimum of 1.0 and sample_size/total_count.
-        total_count = predictions.count()
-        fraction = min(1.0, sample_size / total_count) if total_count > 0 else 1.0
-        pdf = predictions.select("pm10", "prediction").sample(False, fraction, seed=42).toPandas()
+        # Convert to pandas for easier plotting
+        pdf = predictions_df.toPandas()
         
-        # Create the plot
-        plt.figure(figsize=(10, 6))
-        plt.scatter(pdf["pm10"], pdf["prediction"], alpha=0.5)
-        plt.plot([0, pdf["pm10"].max()], [0, pdf["pm10"].max()], 'r--')
-        plt.xlabel("Actual PM10")
-        plt.ylabel("Predicted PM10")
-        plt.title("Actual vs Predicted PM10 Values")
+        # Convert datetime to proper format if needed
+        if not isinstance(pdf['datetime'].iloc[0], datetime):
+            pdf['datetime'] = pd.to_datetime(pdf['datetime'])
         
-        # Save plot if path provided, otherwise save with default naming convention in MODEL_DIR
-        if save_path:
-            plt.savefig(save_path)
-            logger.info(f"Prediction plot saved to: {save_path}")
-            return save_path
-        else:
-            plot_path = os.path.join(MODEL_DIR, f"prediction_plot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
-            plt.savefig(plot_path)
-            logger.info(f"Prediction plot saved to: {plot_path}")
-            return plot_path
+        # Sort by datetime
+        pdf = pdf.sort_values('datetime')
+        
+        # Separate historical and future data
+        historical = pdf[pdf['is_future'] == False]
+        future = pdf[pdf['is_future'] == True]
+        
+        # Create figure and axis
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        # Plot historical actual values
+        ax.plot(historical['datetime'], historical['pm10'], 
+                color='blue', label='Historical PM10', linewidth=2)
+        
+        # Plot historical predictions (for validation)
+        if 'prediction' in historical.columns:
+            ax.plot(historical['datetime'], historical['prediction'], 
+                    color='green', label='Model Fit', linewidth=1, linestyle='--')
+        
+        # Plot future predictions
+        if 'prediction' in future.columns:
+            ax.plot(future['datetime'], future['prediction'], 
+                    color='red', label='PM10 Forecast', linewidth=2)
+        
+        # Add PM2.5 if available
+        if 'pm2_5' in historical.columns:
+            ax2 = ax.twinx()
+            ax2.plot(historical['datetime'], historical['pm2_5'], 
+                    color='purple', label='Historical PM2.5', linewidth=1, alpha=0.7)
             
-    except Exception as e:
-        logger.error(f"Error creating prediction plot: {str(e)}")
-        return None
-
-def load_model(model_path):
-    """
-    Load a previously saved model from disk.
-    
-    Parameters:
-        model_path (str): Path to the saved model directory
+            if 'pm2_5_prediction' in future.columns:
+                ax2.plot(future['datetime'], future['pm2_5_prediction'], 
+                        color='magenta', label='PM2.5 Forecast', linewidth=1, alpha=0.7)
+            
+            ax2.set_ylabel('PM2.5 (μg/m³)', color='purple')
+            ax2.tick_params(axis='y', labelcolor='purple')
         
-    Returns:
-        PipelineModel: Loaded trained model
+        # Add vertical line separating historical data from predictions
+        if not future.empty and not historical.empty:
+            separation_date = future['datetime'].min()
+            ax.axvline(x=separation_date, color='black', linestyle='-', linewidth=1)
+            ax.text(separation_date, ax.get_ylim()[1]*0.95, 'Forecast Start', 
+                    ha='center', va='top', backgroundcolor='white')
+        
+        # Customize the plot
+        ax.set_xlabel('Date')
+        ax.set_ylabel('PM10 (μg/m³)', color='blue')
+        ax.tick_params(axis='y', labelcolor='blue')
+        
+        # Format x-axis to show dates nicely
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        fig.autofmt_xdate()
+        
+        # Add grid, title and legend
+        ax.grid(True, linestyle='--', alpha=0.7)
+        plt.title('PM10 and PM2.5 Air Quality Forecast', fontsize=14)
+        
+        # Combine legends from both axes
+        lines1, labels1 = ax.get_legend_handles_labels()
+        if 'pm2_5' in historical.columns:
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            ax.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+        else:
+            ax.legend(loc='upper left')
+        
+        # Save the plot
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"air_quality_forecast_{timestamp}.png"
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
+        logger.info(f"Forecast plot saved as {filename}")
+        
+        # Show the plot
+        plt.tight_layout()
+        plt.show()
+        
+    except Exception as e:
+        logger.error(f"Error plotting predictions: {str(e)}")
+
+def load_model(model_path: str) -> PipelineModel:
+    """
+    Load a previously saved Spark ML PipelineModel from disk.
+    If `model_path` itself doesn’t contain metadata/, look for a
+    subdirectory that does.
     """
     if not os.path.exists(model_path):
         logger.error(f"Model path does not exist: {model_path}")
         raise FileNotFoundError(f"No model found at: {model_path}")
 
-    logger.info(f"Loading model from: {model_path}")
-    model = PipelineModel.load(model_path)
+    # If this directory already has metadata/, load it directly
+    if os.path.isdir(os.path.join(model_path, "metadata")):
+        real_model_path = model_path
+    else:
+        # otherwise scan for a subdirectory that has metadata/
+        candidates = [
+            os.path.join(model_path, d)
+            for d in os.listdir(model_path)
+            if os.path.isdir(os.path.join(model_path, d))
+        ]
+        real_model_path = None
+        for cand in candidates:
+            if os.path.isdir(os.path.join(cand, "metadata")):
+                real_model_path = cand
+                break
+
+        if real_model_path is None:
+            logger.error(f"No Spark ML model found under: {model_path}")
+            raise FileNotFoundError(f"No Spark ML model found in: {model_path}")
+
+    logger.info(f"Loading Spark ML PipelineModel from: {real_model_path}")
+    model = PipelineModel.load(real_model_path)
     logger.info("Model loaded successfully")
     return model

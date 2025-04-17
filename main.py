@@ -20,17 +20,20 @@ os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 
 # Add project root to path to enable imports from src
 project_root = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, project_root)
+sys.path.insert(0, os.path.join(project_root, "src"))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 src_path = os.path.join(project_root, "src")
 if src_path not in sys.path:
     sys.path.insert(0, src_path)
 
+
 # Import project modules
-from db_operations import check_db_ready, execute_db_query
+from db.db_operations import check_db_ready, execute_db_query
 from utils import setup_logging, create_spark_session, cleanup_resources
-from data_fetching import fetch_debrecen_data, fetch_current_data, get_prediction_input_data
-from model_building import (
+from fetching.data_fetching import assemble_and_pass, fetch_current_data, get_prediction_input_data
+from model.model_building import (
     build_rf_model_pipeline,
     train_model,
     evaluate_model,
@@ -38,32 +41,52 @@ from model_building import (
     load_model,
     plot_predictions,
 )
-from data_processing import add_urban_features, validate_data, prepare_training_data
-from config import MODEL_DIR
+from model.data_processing import add_urban_features, validate_data, prepare_training_data, add_unified_features
+from config import MODEL_DIR, FEATURE_COLUMNS
 
 logger = setup_logging(logging.INFO)
 
 def build_model_for_2024(spark):
     logger.info("Starting model training for 2024...")
     try:
-        df = fetch_debrecen_data(spark)
-        df = add_urban_features(df)
-        if not validate_data(df):
-            logger.error("Data validation failed.")
-            return
-        train_df, _ = prepare_training_data(df, test_ratio=0.2)
-        pipeline, _ = build_rf_model_pipeline()
-        model = train_model(pipeline, train_df)
-        metrics = evaluate_model(model, train_df)
-        logger.info(f"Evaluation Metrics: {metrics}")
-        predictions = model.transform(train_df)
-        plot_predictions(predictions)
-        model_path = save_model(model, model_name="pm10_rf_model")
-        logger.info(f"Model saved locally at: {model_path}")
+        save = input("Save raw data to db? (y/n): ")
+        if save == 'n':
+        
+            df = assemble_and_pass(spark,'n','save','historical_2024')
+            df = add_urban_features(df)
+            if not validate_data(df):
+                logger.error("Data validation failed.")
+                return
+            train_df, _ = prepare_training_data(df, test_ratio=0.2)
+            pipeline, _ = build_rf_model_pipeline()
+            model = train_model(pipeline, train_df)
+            metrics = evaluate_model(model, train_df)
+            logger.info(f"Evaluation Metrics: {metrics}")
+            predictions = model.transform(train_df)
+            plot_predictions(predictions)
+            model_path = save_model(model, model_name="pm10_rf_model")
+            logger.info(f"Model saved locally at: {model_path}")
+       
+        else:
+            df = assemble_and_pass(spark,'y','save','historical_2024')
+            df = add_urban_features(df)
+            if not validate_data(df):
+                logger.error("Data validation failed.")
+                return
+            train_df, _ = prepare_training_data(df, test_ratio=0.2)
+            pipeline, _ = build_rf_model_pipeline()
+            model = train_model(pipeline, train_df)
+            metrics = evaluate_model(model, train_df)
+            logger.info(f"Evaluation Metrics: {metrics}")
+            predictions = model.transform(train_df)
+            plot_predictions(predictions)
+            model_path = save_model(model, model_name="pm10_rf_model")
+            logger.info(f"Model saved locally at: {model_path}")
+    
     except Exception as e:
         logger.error(f"Error building model for 2024: {str(e)}")
 
-def predict_future_air_quality(spark, model):
+
     try:
         input_df = get_prediction_input_data(spark)
         if input_df is None:
@@ -124,7 +147,6 @@ def load_latest_model_path(model_dir=MODEL_DIR):
         logger.error(f"Failed to find latest model: {str(e)}")
         return None
 
-def predict_with_latest_model(spark):
     logger.info("Loading latest model for prediction...")
     model_path = load_latest_model_path()
     if not model_path:
@@ -137,6 +159,31 @@ def predict_with_latest_model(spark):
     except Exception as e:
         logger.error(f"Failed to load and predict: {str(e)}")
 
+def predict_future_pm10(spark: SparkSession):
+    model_path = r"C:\Users\Bence\szakdoga\particle-predictor\models\pm10_rf_model_20250417_201040"
+    
+    raw_df = get_prediction_input_data(spark)
+    if raw_df is None:
+        raise RuntimeError("Failed to fetch prediction input data")
+
+    feat_df = add_unified_features(raw_df)
+
+    missing = [c for c in FEATURE_COLUMNS if c not in feat_df.columns]
+    if missing:
+        raise ValueError(f"After feature-engineering, missing columns: {missing}")
+
+    pm10_model = load_model(model_path)
+
+    predictions = pm10_model.transform(feat_df)
+
+    predictions = predictions.select("datetime", "pm10", "pm2_5", "prediction", "is_future")
+
+    # Plot the predictions
+    from model.model_building import plot_predictions
+    plot_predictions(predictions)
+
+    return predictions
+
 def display_menu():
     print("\n==================== PM10 Prediction Pipeline Menu ====================")
     print("1. Build model for 2024")
@@ -145,8 +192,8 @@ def display_menu():
     print("   - Start continuous tracking and storage of current sensor readings.")
     print("3. Create database query.")
     print("   - View the raw data in the database.")
-    print("4. Exit")
-    print("5. Load latest model and predict air quality")
+    print("4. Load latest model and predict air quality")
+    print("5. Exit")
     print("========================================================================")
     choice = input("Enter your choice number: ")
     return choice.strip()
@@ -175,12 +222,12 @@ def main():
                 print("\nReturning to main menu...")
                 time.sleep(2)
             elif choice == "4":
-                print("\nExiting application. Goodbye!")
-                break
-            elif choice == "5":
-                predict_with_latest_model(spark)
+                predict_future_pm10(spark)
                 print("\nReturning to main menu...")
                 time.sleep(2)
+            elif choice == "5":
+                print("\nExiting application. Goodbye!")
+                break
             else:
                 print("Invalid selection. Please try again.")
     except Exception as e:
