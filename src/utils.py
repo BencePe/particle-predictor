@@ -6,7 +6,7 @@ import os
 import logging
 import sys
 from datetime import datetime
-from config import LOG_DIR, SPARK_CONFIG  # Fixed import
+from src.config import LOG_DIR, SPARK_CONFIG  # Fixed import
 
 def setup_logging(log_level=logging.INFO):
     """

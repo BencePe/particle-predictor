@@ -16,16 +16,17 @@ from retry_requests import retry
 from pyspark.sql.functions import lit, col, date_trunc, avg
 from pyspark.sql.types import TimestampType
 
-from config import (
+from src.config import (
     DEBRECEN_LAT, DEBRECEN_LON, DEBRECEN_ELEVATION, 
     START_DATE, END_DATE,
     THINGSPEAK_CHANNEL_ID, THINGSPEAK_READ_API_KEY,
     OW_API_KEY
 )
-from db.db_operations import db_data_transaction
-from dataframe.assemble_dataframe import assemble_dataframe
-from dataframe.normalize_timestamp import normalize_timestamp
-from dataframe.optimize_dataframe import optimize_dataframe
+from src.db.db_operations import db_data_transaction
+from src.dataframe.assemble_dataframe import assemble_dataframe
+from src.dataframe.normalize_timestamp import normalize_timestamp
+from src.dataframe.optimize_dataframe import optimize_dataframe
+from src.model.data_processing import add_unified_features, add_urban_features, validate_data
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,6 @@ def fetch_open_meteo_data(endpoint, params):
     except Exception as e:
         logger.error(f"Error fetching data from {endpoint}: {str(e)}")
         return None
-
 
 def historical_air_quality(start_date, end_date):
     aq_response = fetch_open_meteo_data(
@@ -165,7 +165,7 @@ def assemble_and_pass(spark, redownload, db_operation, table):
         weather_df = historical_weather(START_DATE.isoformat(),END_DATE.isoformat())
 
         # Merge datasets
-        extra_cols = {"elevation": DEBRECEN_ELEVATION, "is_urban": True}
+        extra_cols = {"elevation": DEBRECEN_ELEVATION, "is_urban": True, "is_future": False}
         merged_spark_df = assemble_dataframe(spark, [aq_df, weather_df], join_key="datetime", how="inner", extra_columns=extra_cols)
         merged_spark_df = merged_spark_df.dropDuplicates(['datetime'])
         final_df = optimize_dataframe(merged_spark_df, partition_cols="datetime", partition_count=48)
@@ -184,7 +184,7 @@ def assemble_and_pass(spark, redownload, db_operation, table):
             return success
             
     except Exception as e:
-        logger.error(f"Error fetching Debrecen data: {str(e)}")
+        logger.error(f"Error fetching data: {str(e)}")
         raise
 
 def fetch_current_data(spark, field_id2=2, field_id4=4, results=1):
@@ -307,8 +307,8 @@ def get_prediction_input_data(spark):
     """
     try:
         # Define date ranges
-        today = datetime.today()
-        past_date = today - timedelta(days=31)
+        today = datetime.today() - timedelta(1)
+        past_date = today - timedelta(days=90)
         future_date = today + timedelta(days=7)
         
         # Format as strings for API calls
@@ -359,6 +359,12 @@ def get_prediction_input_data(spark):
         # Convert to Spark DataFrame
         input_df = spark.createDataFrame(combined_df)
         
+        input_df = add_urban_features(input_df)
+        input_df = add_unified_features(input_df)
+        if not validate_data(input_df):
+            logger.error("Data validation failed.")
+            return
+
         return input_df
         
     except Exception as e:

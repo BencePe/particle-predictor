@@ -1,5 +1,5 @@
-from fetching.data_fetching import get_prediction_input_data, logger
-
+from src.fetching.data_fetching import get_prediction_input_data, logger
+from src.model.model_building import plot_predictions
 
 from pyspark.ml import PipelineModel
 from pyspark.sql import SparkSession
@@ -31,13 +31,12 @@ def predict_future_air_quality(spark: SparkSession, model: PipelineModel):
         # Generate predictions
         full_predictions = model.transform(input_df)
         logger.info("All predictions generated successfully.")
-        full_predictions.show(10, truncate=False)
+        plot_predictions(full_predictions)
 
         # Filter for future predictions only
         future_predictions = full_predictions.filter(col("is_future") == True)
         logger.info("Future air quality predictions extracted successfully.")
-        future_predictions.show(10, truncate=False)
-
+        plot_predictions(future_predictions)
         return future_predictions
 
     except Exception as e:

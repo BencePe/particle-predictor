@@ -1,5 +1,5 @@
-from config import DATA_DIR
-from fetching.data_fetching import logger
+from src.config import DATA_DIR
+from src.fetching.data_fetching import logger
 
 
 import os

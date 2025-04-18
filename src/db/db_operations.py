@@ -6,7 +6,7 @@ import psycopg2
 from psycopg2 import sql
 import logging
 import time
-from config import DB_CONFIG
+from src.config import DB_CONFIG
 
 logger = logging.getLogger(__name__)
 

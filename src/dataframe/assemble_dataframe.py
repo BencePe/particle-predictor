@@ -1,6 +1,6 @@
 
 import logging
-from dataframe.normalize_timestamp import normalize_timestamp
+from src.dataframe.normalize_timestamp import normalize_timestamp
 
 
 import pandas as pd

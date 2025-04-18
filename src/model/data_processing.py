@@ -1,4 +1,4 @@
-from config import FEATURE_COLUMNS
+from src.config import FEATURE_COLUMNS
 
 """
 Data processing and feature engineering functions.

@@ -13,7 +13,7 @@ from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.regression import GBTRegressor, RandomForestRegressor
 from pyspark.ml.evaluation import RegressionEvaluator
 
-from config import MODEL_DIR, MODEL_PARAMS, FEATURE_COLUMNS
+from src.config import MODEL_DIR, MODEL_PARAMS, FEATURE_COLUMNS
 
 logger = logging.getLogger(__name__)
 
