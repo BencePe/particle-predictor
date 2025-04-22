@@ -7,24 +7,34 @@ import os
 import sys
 import logging
 import time
+
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import lit
+
+from pyspark.ml import Pipeline
+from pyspark.ml.regression import GBTRegressor
 
 from src.prediction.predict_future_air_quality import predict_future_air_quality
 from src.db.db_operations import check_db_ready, execute_db_query
 from src.utils import setup_logging, create_spark_session, cleanup_resources
 from src.fetching.data_fetching import assemble_and_pass, fetch_current_data
+
+# ──────────────────────────────────────────────────────────────────────────────
+# bring in all the new functions
 from src.model.model_building import (
-    build_rf_model_pipeline,
+    build_residual_pipeline,
+    apply_residual_correction,
+    build_improved_model_pipeline,
     train_model,
     evaluate_model,
     save_model,
     load_model,
-    plot_predictions,
+    analyze_feature_importance,
+    hyperopt_gbt
 )
-from src.model.data_processing import add_urban_features, validate_data, prepare_training_data, add_unified_features
-from src.config import MODEL_DIR, FEATURE_COLUMNS
+from src.model.data_processing import add_unified_features, validate_data, prepare_training_data
 
+from src.config import MODEL_DIR, FEATURE_COLUMNS, START_DATE, END_DATE, MODEL_PARAMS
 
 # Set the Python executables for Spark
 os.environ["PYSPARK_PYTHON"] = sys.executable
@@ -42,36 +52,86 @@ if src_path not in sys.path:
 
 logger = setup_logging(logging.INFO)
 
+
 def build_model_for_2024(spark):
-    logger.info("Starting model training for 2024...")
+    logger.info("Starting model training (2020-2025)...")
     try:
         save = input("Save raw data to db? (y/n): ").strip().lower()
 
-        df = assemble_and_pass(spark, save, 'save', 'historical_2024')
-        df = add_urban_features(df)
-        df = add_unified_features(df)
-        df = df.withColumn("is_future", lit(False))
+        # 1) Load & preprocess
+        df = assemble_and_pass(spark, START_DATE, END_DATE, save, 'save', 'historical_2024')
+        df = add_unified_features(df).withColumn("is_future", lit(False))
 
         if not validate_data(df):
             logger.error("Data validation failed.")
             return
 
-        train_df, _ = prepare_training_data(df, test_ratio=0.2)
-        pipeline, _ = build_rf_model_pipeline()
-        model = train_model(pipeline, train_df)
-        metrics = evaluate_model(model, train_df)
-        logger.info(f"Evaluation Metrics: {metrics}")
+        # 2) Time‑based split into train / test
+        train_df, test_df = prepare_training_data(df, test_ratio=0.2)
 
-        predictions = model.transform(train_df)
-        if save == 'y':
-            plot_predictions(predictions)
-            5
-        plot_predictions(predictions)
-        model_path = save_model(model, model_name="pm10_rf_model")
-        logger.info(f"Model saved locally at: {model_path}")
+        # 3) Build base pipeline (assembler + scaler only)
+        base_pipe, feature_cols = build_improved_model_pipeline()
+        assembler_stage, scaler_stage = base_pipe.getStages()
+
+        # 4) Further split train_df → train_small / val_small for Hyperopt
+        train_small, val_small = train_df.randomSplit([0.9, 0.1], seed=42)
+
+
+        # 5) Hyperopt search for best GBT params
+        best_params, trials = hyperopt_gbt(
+            train_small, 
+            val_small, 
+            assembler_stage, 
+            scaler_stage,
+            max_evals=50
+        )
+        logger.info(f"Hyperopt returned: {best_params}")
+
+        # 6) Build final GBT regressor with best params
+        gbt = GBTRegressor(
+            labelCol="pm10",
+            featuresCol="features",
+            maxDepth=int(best_params["maxDepth"]),
+            maxIter=int(best_params["maxIter"]),
+            stepSize=best_params["stepSize"],
+            subsamplingRate=best_params["subsamplingRate"],
+            seed=MODEL_PARAMS.get("seed", 42)
+        )
+        full_pipeline = Pipeline(stages=[assembler_stage, scaler_stage, gbt])
+
+        # 7) Train on full train_df
+        model = train_model(full_pipeline, train_df)
+
+        # 8) Feature importance on the tuned model
+        analyze_feature_importance(model, feature_cols)
+
+        # 9) Build & train residual‑stacking model
+        res_model = build_residual_pipeline(model, train_df, feature_cols)
+
+        # 10) Evaluate both base & residual forecasts on held‑out test_df
+        # 10a) Base RMSE
+        base_metrics = evaluate_model(model, test_df, prediction_col="prediction")
+        logger.info(f"Base GBT metrics on test set: {base_metrics}")
+
+        # 10b) Residual‑corrected RMSE
+        corrected = apply_residual_correction(model, res_model, test_df)
+        resid_metrics = evaluate_model(corrected, None, prediction_col="final_prediction", is_transformed=True)
+        logger.info(f"Residual‑stacked metrics on test set: {resid_metrics}")
+
+        # 11) Save both models
+        gbt_path = save_model(model, model_name="pm10_gbt_model")
+        resid_path = save_model(res_model, model_name="pm10_res_model")
+        logger.info(f"Models saved:\n • GBT: {gbt_path}\n • Residual: {resid_path}")
+
+        return {
+            "model": model,
+            "residual_model": res_model,
+            "base_metrics": base_metrics,
+            "resid_metrics": resid_metrics
+        }
 
     except Exception as e:
-        logger.error(f"Error building model for 2024: {str(e)}")
+        logger.error(f"Error building model for 2024: {str(e)}", exc_info=True)
 
 def fetch_current_sensor_data(spark):
     logger.info("Starting current data tracking...")
@@ -92,6 +152,7 @@ def fetch_current_sensor_data(spark):
         logger.error(f"Error in data tracking: {str(e)}")
         return False
 
+
 def interact_with_db():
     query = input("Enter your query: ")
     logger.info(f"Executing query: {query}")
@@ -103,35 +164,28 @@ def interact_with_db():
     else:
         print("Query failed.")
 
-def load_latest_model_path(model_dir=MODEL_DIR):
+
+def load_latest_and_predict(spark: SparkSession, model_dir=MODEL_DIR):
+    logger.info("Loading latest model for prediction...")
     try:
         model_folders = [
             f for f in os.listdir(model_dir)
-            if os.path.isdir(os.path.join(model_dir, f)) and "pm10_rf_model" in f
+            if os.path.isdir(os.path.join(model_dir, f)) and "pm10_gbt_model" in f
         ]
         if not model_folders:
             logger.error("No model found in the model directory.")
-            return None
-        latest_model = sorted(model_folders)[-1]
-        return os.path.join(model_dir, latest_model)
-    except Exception as e:
-        logger.error(f"Failed to find latest model: {str(e)}")
-        return None
+            return
 
-def load_latest_and_predict(spark: SparkSession):
-    logger.info("Loading latest model for prediction...")
-    model_path = load_latest_model_path()
-    
-    if not model_path:
-        logger.error("Prediction aborted. No model available.")
-        return
-    
-    try:
+        latest_model = sorted(model_folders)[-1]
+        model_path   = os.path.join(model_dir, latest_model)
+
         model = load_model(model_path)
         logger.info(f"Model loaded from {model_path}")
         predict_future_air_quality(spark, model)
+
     except Exception as e:
-        logger.error(f"Failed to load and predict: {str(e)}")
+        logger.error(f"Failed to load model or predict: {str(e)}")
+
 
 def display_menu():
     print("\n==================== PM10 Prediction Pipeline Menu ====================")
@@ -144,8 +198,8 @@ def display_menu():
     print("4. Load latest model and predict air quality")
     print("5. Exit")
     print("========================================================================")
-    choice = input("Enter your choice number: ")
-    return choice.strip()
+    return input("Enter your choice number: ").strip()
+
 
 def main():
     spark = None
@@ -154,6 +208,7 @@ def main():
         if not check_db_ready():
             logger.error("Database is not available. Exiting...")
             sys.exit(1)
+
         while True:
             choice = display_menu()
             if choice == "1":
@@ -163,8 +218,8 @@ def main():
             elif choice == "2":
                 print("\nStarting continuous data tracking (press Ctrl+C to stop)...")
                 success = fetch_current_sensor_data(spark)
-                message = "Data tracking stopped." if success else "Data tracking failed."
-                print(f"\n{message}\nReturning to main menu...")
+                msg = "Data tracking stopped." if success else "Data tracking failed."
+                print(f"\n{msg}\nReturning to main menu...")
                 time.sleep(2)
             elif choice == "3":
                 interact_with_db()
@@ -179,12 +234,14 @@ def main():
                 break
             else:
                 print("Invalid selection. Please try again.")
+
     except Exception as e:
-        logger.error(f"Unhandled exception: {str(e)}")
+        logger.error(f"Unhandled exception: {str(e)}", exc_info=True)
     finally:
         if spark:
             cleanup_resources(spark)
         sys.exit(0)
+
 
 if __name__ == "__main__":
     main()

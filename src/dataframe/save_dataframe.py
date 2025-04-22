@@ -1,9 +1,8 @@
 from src.config import DATA_DIR
 from src.fetching.data_fetching import logger
-
-
-import os
 from datetime import datetime
+import os
+
 
 
 def save_dataframe(df, name_prefix, mode="overwrite"):

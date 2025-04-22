@@ -5,26 +5,22 @@ Data fetching functions for the PM10 prediction project.
 import pandas as pd
 import pytz
 import requests
-import time
-import json
 import logging
 from datetime import datetime, timedelta
 
 import openmeteo_requests
 import requests_cache
 from retry_requests import retry
-from pyspark.sql.functions import lit, col, date_trunc, avg
-from pyspark.sql.types import TimestampType
+from pyspark.sql.functions import lit, col
 
 from src.config import (
-    DEBRECEN_LAT, DEBRECEN_LON, DEBRECEN_ELEVATION, 
-    START_DATE, END_DATE,
+    DEBRECEN_LAT, DEBRECEN_LON, DEBRECEN_ELEVATION,
     THINGSPEAK_CHANNEL_ID, THINGSPEAK_READ_API_KEY,
     OW_API_KEY
 )
+
 from src.db.db_operations import db_data_transaction
 from src.dataframe.assemble_dataframe import assemble_dataframe
-from src.dataframe.normalize_timestamp import normalize_timestamp
 from src.dataframe.optimize_dataframe import optimize_dataframe
 from src.model.data_processing import add_unified_features, add_urban_features, validate_data
 
@@ -56,31 +52,43 @@ def fetch_open_meteo_data(endpoint, params):
 
 def historical_air_quality(start_date, end_date):
     aq_response = fetch_open_meteo_data(
-    "https://air-quality-api.open-meteo.com/v1/air-quality",
-    params={
-        "latitude": DEBRECEN_LAT,
-        "longitude": DEBRECEN_LON,
-        "hourly": ["pm10", "pm2_5"],
-        "start_date": start_date,
-        "end_date": end_date
+        "https://air-quality-api.open-meteo.com/v1/air-quality",
+        params={
+            "latitude": DEBRECEN_LAT,
+            "longitude": DEBRECEN_LON,
+            "hourly": ["pm10", "pm2_5"],
+            "start_date": start_date,
+            "end_date": end_date
         }
     )
     if not aq_response:
         return None
 
-    aq_hourly = aq_response.Hourly()
-    aq_data = {
-        "datetime": pd.date_range(
-            start=pd.to_datetime(aq_hourly.Time(), unit="s", utc=True),
-            end=pd.to_datetime(aq_hourly.TimeEnd(), unit="s", utc=True),
-            freq=pd.Timedelta(seconds=aq_hourly.Interval()),
-            inclusive="left"
-        ).tz_localize(None),
-        "pm10": aq_hourly.Variables(0).ValuesAsNumpy(),
-        "pm2_5": aq_hourly.Variables(1).ValuesAsNumpy()
-    }
-    aq_df = pd.DataFrame(aq_data)
-    return aq_df
+    try:
+        aq_hourly = aq_response.Hourly()
+        # Validate required methods exist
+        if not (callable(aq_hourly.Time) and callable(aq_hourly.TimeEnd) and callable(aq_hourly.Interval)):
+            logger.error("Invalid hourly data structure in air quality response")
+            return None
+
+        time_start = pd.to_datetime(aq_hourly.Time(), unit="s", utc=True)
+        time_end = pd.to_datetime(aq_hourly.TimeEnd(), unit="s", utc=True)
+        interval = aq_hourly.Interval()
+
+        aq_data = {
+            "datetime": pd.date_range(
+                start=time_start,
+                end=time_end,
+                freq=pd.Timedelta(seconds=interval),
+                inclusive="left"
+            ).tz_localize(None),
+            "pm10": aq_hourly.Variables(0).ValuesAsNumpy(),
+            "pm2_5": aq_hourly.Variables(1).ValuesAsNumpy()
+        }
+        return pd.DataFrame(aq_data)
+    except AttributeError as e:
+        logger.error(f"Invalid air quality API response structure: {str(e)}")
+        return None
 
 def historical_weather(start_date, end_date):
     weather_response = fetch_open_meteo_data(
@@ -88,13 +96,13 @@ def historical_weather(start_date, end_date):
         params={
             "latitude": DEBRECEN_LAT,
             "longitude": DEBRECEN_LON,
+            "start_date": start_date,
+            "end_date": end_date,
             "hourly": [
                 "temperature_2m", "relative_humidity_2m",
                 "surface_pressure", "wind_speed_10m",
                 "wind_direction_10m"
-            ],
-            "start_date": start_date,
-            "end_date": end_date
+            ]
             }
         )
     if not weather_response:
@@ -117,7 +125,7 @@ def historical_weather(start_date, end_date):
     weather_df = pd.DataFrame(weather_data)
     return weather_df
 
-def future_weather():
+def future_weather(start_date, end_date):
     weather_response = fetch_open_meteo_data(
         "https://api.open-meteo.com/v1/forecast",
         params={
@@ -127,7 +135,9 @@ def future_weather():
                 "temperature_2m", "relative_humidity_2m",
                 "surface_pressure", "wind_speed_10m",
                 "wind_direction_10m"
-                ]
+                ],
+                "start_date": start_date,
+                "end_date": end_date
             }
         )
     if not weather_response:
@@ -150,7 +160,7 @@ def future_weather():
     weather_df = pd.DataFrame(weather_data)
     return weather_df
 
-def assemble_and_pass(spark, redownload, db_operation, table):
+def assemble_and_pass(spark, start_date, end_date, is_future = 'False', redownload = 'n', db_operation = '', table = ''):
     """
     Fetch historical air quality and weather data for model building or prediction (default is model building).
 
@@ -161,27 +171,27 @@ def assemble_and_pass(spark, redownload, db_operation, table):
         Spark DataFrame with merged data.
     """
     try:
-        aq_df = historical_air_quality(START_DATE.isoformat(),END_DATE.isoformat())
-        weather_df = historical_weather(START_DATE.isoformat(),END_DATE.isoformat())
+        aq_df = historical_air_quality(start_date.isoformat(),end_date.isoformat())
+        weather_df = historical_weather(start_date.isoformat(),end_date.isoformat())
 
         # Merge datasets
-        extra_cols = {"elevation": DEBRECEN_ELEVATION, "is_urban": True, "is_future": False}
+        extra_cols = {"elevation": DEBRECEN_ELEVATION, "is_urban": True, "is_future": is_future}
         merged_spark_df = assemble_dataframe(spark, [aq_df, weather_df], join_key="datetime", how="inner", extra_columns=extra_cols)
         merged_spark_df = merged_spark_df.dropDuplicates(['datetime'])
         final_df = optimize_dataframe(merged_spark_df, partition_cols="datetime", partition_count=48)
         db_columns = ["datetime", "pm10", "pm2_5", "temperature", "humidity", 
-                      "pressure", "wind_speed", "wind_dir", "elevation", "is_urban"]
+                      "pressure", "wind_speed", "wind_dir", "elevation", "is_urban", "is_future"]
         db_df = final_df.select(*db_columns)
         
 
-        if redownload == 'n':
-            logger.info("Data successfully extracted.")
-            return db_df
-        else:
+        if redownload == 'y':
             success = db_data_transaction(spark, db_operation, table, data=db_df)
             if success:
                 logger.info("Data successfully saved to table.")
             return success
+        else:
+            logger.info("Data successfully extracted.")
+            return db_df
             
     except Exception as e:
         logger.error(f"Error fetching data: {str(e)}")
@@ -303,70 +313,81 @@ def fetch_current_data(spark, field_id2=2, field_id4=4, results=1):
 
 def get_prediction_input_data(spark):
     """
-    Fetches historical data and prepares future data for prediction.
+    Fetch last 90 days of AQ+weather, then next 14 days of weather (with a 1-day overlap),
+    stitch together, flag true future rows, run feature pipelines, and split out
+    the final historical and future Spark DataFrames.
     """
     try:
-        # Define date ranges
-        today = datetime.today() - timedelta(1)
-        past_date = today - timedelta(days=90)
-        future_date = today + timedelta(days=7)
-        
-        # Format as strings for API calls
-        today_str = today.strftime('%Y-%m-%d')
-        past_str = past_date.strftime('%Y-%m-%d')
-        future_str = future_date.strftime('%Y-%m-%d')
-        
-        logger.info(f"Fetching historical data from {past_str} to {today_str}")
-        logger.info(f"Preparing future data from {today_str} to {future_str}")
-        
-        # Fetch historical weather and air quality data
-        hist_weather_df = historical_weather(past_str, today_str)
-        hist_aq_df = historical_air_quality(past_str, today_str)
-        
-        # Fetch future weather data (next 7 days)
-        future_weather_df = future_weather()
-        
-        # Create merged historical dataframe
-        if not hist_weather_df.empty and not hist_aq_df.empty:
-            historical_df = pd.merge(hist_weather_df, hist_aq_df, on='datetime', how='inner')
-            historical_df['is_future'] = False
-            historical_df['is_urban'] = True
-            historical_df['elevation'] = DEBRECEN_ELEVATION
-        else:
-            logger.error("Failed to fetch historical data")
-            return None
-            
-        # Prepare future dataframe with weather data only
-        if not future_weather_df.empty:
-            future_df = future_weather_df.copy()
-            
-            # Add placeholder PM columns
-            pm_columns = [col for col in hist_aq_df.columns if col != 'datetime']
-            for col in pm_columns:
-                future_df[col] = None    
-            
-            future_df['elevation'] = DEBRECEN_ELEVATION
-            future_df['is_urban'] = True
-            future_df['is_future'] = True
+        # 1) parameters & fetch history
+        today    = datetime.today().date() - timedelta(days=1)
+        past_90  = today - timedelta(days=90)
+        hist_spark = assemble_and_pass(spark, past_90, today, False, 'n', '', '')
+        hist_df    = hist_spark.toPandas()
+        logger.info(f"Historical data shape: {hist_df.shape}")
 
-        else:
-            logger.error("Failed to fetch future weather data")
+        # 2) fetch future-weather from yesterday → today+14
+        fut_start = (today - timedelta(days=2)).strftime('%Y-%m-%d')
+        fut_end   = (today + timedelta(days=14)).strftime('%Y-%m-%d')
+        logger.info(f"Requesting future weather from {fut_start} to {fut_end}")
+        fut_df = future_weather(fut_start, fut_end)
+        if fut_df is None:
             return None
-            
-        # Combine datasets
-        combined_df = pd.concat([historical_df, future_df], ignore_index=True)
-        
-        # Convert to Spark DataFrame
-        input_df = spark.createDataFrame(combined_df)
-        
-        input_df = add_urban_features(input_df)
-        input_df = add_unified_features(input_df)
-        if not validate_data(input_df):
-            logger.error("Data validation failed.")
-            return
+        fut_df['datetime'] = pd.to_datetime(fut_df['datetime']).dt.floor('H')
+        logger.info(f"Future weather shape: {fut_df.shape}")
 
-        return input_df
-        
+        # 3) set up the full schema
+        db_columns = [
+            "datetime","pm10","pm2_5",
+            "temperature","humidity","pressure",
+            "wind_speed","wind_dir",
+            "elevation","is_urban","is_future"
+        ]
+
+        # 4) stitch & dedupe & sort
+        wf = pd.concat([hist_df, fut_df], ignore_index=True)
+        wf = (
+            wf
+            .drop_duplicates('datetime')
+            .sort_values('datetime')
+            .reset_index(drop=True)
+        )
+
+        # 5) re-assign is_future based on last real history
+        last_hist = hist_df['datetime'].max()
+        wf['is_future'] = wf['datetime'] > last_hist
+
+        # 6) fill in the remaining columns for both blocks
+        wf['is_urban']  = True
+        wf['elevation'] = DEBRECEN_ELEVATION
+        for c in ['pm10','pm2_5']:
+            if c not in wf.columns:
+                wf[c] = None
+
+        # 7) select & reorder to match db_columns
+        combo = wf[db_columns]
+
+        # 8) back to Spark & feature pipelines
+        sdf = spark.createDataFrame(combo)
+        sdf = add_unified_features(sdf)
+        sdf.orderBy("datetime").show(200, truncate=False)
+
+        if not validate_data(sdf):
+            return None
+
+        # 9) split final DFs
+        hist_spark = sdf.filter(col('is_future') == False).filter(col('pm10').isNotNull())
+        future_spark = sdf.filter(col('is_future') == True).select(
+            'datetime', 'temperature', 'humidity', 'pressure', 'wind_speed', 'wind_dir'
+        )
+
+        # 10) debug prints
+        print("\n=== LAST HISTORICAL RECORDS ===")
+        hist_spark.orderBy(col("datetime").desc()).show(5, truncate=False)
+        print("\n=== FIRST FUTURE RECORDS ===")
+        future_spark.orderBy("datetime").show(5, truncate=False)
+
+        return hist_spark, future_spark
+
     except Exception as e:
-        logger.error(f"Error fetching prediction input data: {str(e)}")
+        logger.error(f"Error in get_prediction_input_data: {e}", exc_info=True)
         return None
