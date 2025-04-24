@@ -8,56 +8,60 @@ from datetime import datetime
 
 from matplotlib import dates
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 from pyspark.ml import Pipeline, PipelineModel
 from pyspark.ml.feature import VectorAssembler, StandardScaler
 from pyspark.ml.regression import GBTRegressor, RandomForestRegressor, LinearRegression
 from pyspark.ml.evaluation import RegressionEvaluator
+from pyspark.sql import functions as F
 from pyspark.sql.functions import col
 
 from hyperopt import fmin, tpe, hp, Trials, STATUS_OK
 from hyperopt.pyll.base import scope
 
 from src.config import MODEL_DIR, MODEL_PARAMS, FEATURE_COLUMNS
+from src.model.time_splits import hybrid_time_validation
 
 logger = logging.getLogger(__name__)
 
-
-# -------------------------------------------------------------------------------
-# Utility: filter features
 def filter_valid_features(df, feature_list):
     available_cols = set(df.columns)
     valid_features = [f for f in feature_list if f in available_cols]
     logger.info(f"Using {len(valid_features)} features for model training")
     return valid_features
 
-
-# -------------------------------------------------------------------------------
-# 1) Build improved base pipeline (assembler + scaler only)
 def build_improved_model_pipeline():
     """
     Build an improved ML pipeline *without* regressor, using only top-ranked features.
     Returns (base_pipeline, feature_list).
     """
-    logger.info("Building pruned pipeline for PM10 prediction (top 12 features)...")
+    logger.info("Building pruned pipeline for PM10 prediction...")
+    
 
-    # Top 12 features from latest feature importance ranking
+    
     top_features = [
-        "12h_pm10_avg",
-        "avg12h_times_diff12h",
-        "pm10_lag12",
-        "pm10_diff_12h",
-        "hour",
-        "12h_pm10_std",
-        "wind_speed",
-        "pm10_diff_48h",
-        "pollution_load",
-        "pm10_lag48",
-        "pm10_lag24",
-        "pm10_diff_24h"
+        "pollution_drift_week", #1
+        "pm10_lag6", #2
+        "6h_pm10_avg", #3
+        "cumulative_24h_precip", #4
+        "temp_humidity_interaction", #5
+        "pm10_12h_avg_sq", #6
+        "72h_pm10_avg", #7
+        "pm10_diff_12h", #8
+        "weekly_pm10_std", #9
+        "12h_humidity_avg", #10
+        "pm10_diff_6h", #11
+        "pm10_acceleration_12h", #12
+        "wind_speed", #13
+        "pm10_diff_48h", #14
+        "temp_lag3", #15
+        "pm10_diff_24h" #16
     ]
+    # top_features = [c for c in FEATURE_COLUMNS if c not in ("pm10")]
 
+    
     assembler = VectorAssembler(
         inputCols=top_features,
         outputCol="assembled_features",
@@ -71,13 +75,9 @@ def build_improved_model_pipeline():
     )
 
     pipeline = Pipeline(stages=[assembler, scaler])
-    logger.info("Base pipeline (pruned) created successfully")
+    logger.info("Base pipeline created successfully")
     return pipeline, top_features
 
-
-
-# -------------------------------------------------------------------------------
-# 2) Predefined RF pipeline
 def build_rf_model_pipeline():
     logger.info("Building Random Forest pipeline for PM10 prediction...")
     assembler = VectorAssembler(
@@ -98,9 +98,6 @@ def build_rf_model_pipeline():
     logger.info("RF pipeline created successfully")
     return pipeline, FEATURE_COLUMNS
 
-
-# -------------------------------------------------------------------------------
-# 3) Train & evaluate
 def train_model(pipeline, train_df):
     logger.info("Training PM10 prediction model...")
     start_time = datetime.now()
@@ -108,7 +105,6 @@ def train_model(pipeline, train_df):
     elapsed = (datetime.now() - start_time).total_seconds()
     logger.info(f"Model training completed in {elapsed:.2f}s")
     return model
-
 
 def evaluate_model(model_or_df, test_df, prediction_col="prediction", is_transformed=False):
     """
@@ -155,15 +151,12 @@ def evaluate_model(model_or_df, test_df, prediction_col="prediction", is_transfo
         logger.error(f"Error evaluating model: {str(e)}")
         return None
 
-# -------------------------------------------------------------------------------
-# 4) Save & load
 def save_model(model, model_name="pm10_gbt_model"):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = os.path.join(MODEL_DIR, f"{model_name}_{timestamp}")
     model.write().overwrite().save(path)
     logger.info(f"Model saved to {path}")
     return path
-
 
 def load_model(model_path: str) -> PipelineModel:
     if not os.path.exists(model_path):
@@ -181,9 +174,6 @@ def load_model(model_path: str) -> PipelineModel:
     logger.info(f"Loading model from {real_path}")
     return PipelineModel.load(real_path)
 
-
-# -------------------------------------------------------------------------------
-# 5) Plotting (unchanged)
 def plot_predictions(predictions_df):
     """
     Enhanced version with date validation and better visual separation
@@ -240,13 +230,10 @@ def plot_predictions(predictions_df):
         logger.error(f"Plotting error: {e}")
         raise
 
-
-# -------------------------------------------------------------------------------
-# 6) CV & feature importance (unchanged)
-def analyze_feature_importance(model, feature_list=None, top_n=20):
+def analyze_feature_importance(model, feature_list=None, top_n=15):
     logger.info("Analyzing feature importance...")
     if feature_list is None:
-        feature_list = [c for c in FEATURE_COLUMNS if c not in ("pm10", "pm2_5")]
+        feature_list = [c for c in FEATURE_COLUMNS if c not in ("pm10")]
 
     tree = model.stages[-1] if isinstance(model, PipelineModel) else model
     try:
@@ -274,12 +261,10 @@ def analyze_feature_importance(model, feature_list=None, top_n=20):
         logger.error(f"Error extracting feature importances: {e}")
         return []
 
-
-def select_top_features(feature_importances, top_n=15):
+def select_top_features(feature_importances, top_n=16):
     top_feats = [f for f,_ in feature_importances[:top_n]]
     logger.info(f"Selected top {len(top_feats)} features: {top_feats}")
     return top_feats
-
 
 def train_and_evaluate_cv(pipeline, splits):
     metrics_list = []
@@ -296,9 +281,25 @@ def train_and_evaluate_cv(pipeline, splits):
     logger.info(f"Avg CV → RMSE={avg['rmse']:.4f}, R²={avg['r2']:.4f}")
     return avg, metrics_list
 
+def train_with_hybrid_cv(df, pipeline_builder, datetime_col="datetime"):
+    logger.info("Generating hybrid time-based validation splits...")
+    
+    # Pre-partition for performance
+    df = df.withColumn("year", F.year(col(datetime_col))) \
+           .withColumn("month", F.month(col(datetime_col))) \
+           .repartition(60, "year", "month") \
+           .cache()
+    
+    # Create splits
+    splits = hybrid_time_validation(df, datetime_col=datetime_col)
+    
+    # Build pipeline
+    pipeline, feats = pipeline_builder()
+    
+    # Run evaluation across splits
+    avg_metrics, all_metrics = train_and_evaluate_cv(pipeline, splits)
+    return avg_metrics
 
-# -------------------------------------------------------------------------------
-# 7) Residual stacking
 def build_residual_pipeline(base_model, train_df, feature_cols):
     # Add base model predictions and calculate residuals
     preds = base_model.transform(train_df).withColumnRenamed("prediction", "base_prediction")
@@ -333,7 +334,6 @@ def build_residual_pipeline(base_model, train_df, feature_cols):
     logger.info("Residual model trained")
     return res_model
 
-
 def apply_residual_correction(base_model, residual_model, df):
     # Apply base model
     base_preds = base_model.transform(df).withColumnRenamed("prediction", "base_prediction")
@@ -349,34 +349,65 @@ def apply_residual_correction(base_model, residual_model, df):
     
     return corrected
 
-# -------------------------------------------------------------------------------
-# 8) Hyperopt GBT search
 def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
     def objective(params):
+        # Hard constraints
+        if params["stepSize"] > 0.35 and params["maxDepth"] > 5:
+            return {"loss": float("inf"), "status": STATUS_OK, "msg": "Too deep + too aggressive"}
+
         gbt = GBTRegressor(
             labelCol="pm10",
             featuresCol="features",
             maxDepth=int(params["maxDepth"]),
             maxIter=int(params["maxIter"]),
-            stepSize=params["stepSize"],
-            subsamplingRate=params["subsamplingRate"],
+            stepSize=float(params["stepSize"]),
+            maxBins=int(params["maxBins"]),
+            minInstancesPerNode=int(params["minInstancesPerNode"]),
+            subsamplingRate=float(params["subsamplingRate"]),
+            featureSubsetStrategy=params["featureSubsetStrategy"],
             seed=MODEL_PARAMS.get("seed", 42)
         )
-        pipe = Pipeline(stages=[assembler_stage, scaler_stage, gbt])
-        mdl = pipe.fit(train_df)
-        rmse = RegressionEvaluator(labelCol="pm10", metricName="rmse") \
-                 .evaluate(mdl.transform(val_df))
-        return {"loss": rmse, "status": STATUS_OK}
+
+        pipeline = Pipeline(stages=[assembler_stage, scaler_stage, gbt])
+        model = pipeline.fit(train_df)
+        metrics = evaluate_model(model, val_df, prediction_col="prediction")
+        val_rmse = metrics["rmse"]
+
+        # Complexity penalty with adjusted weights
+        penalty = (
+            0.25 * int(params["maxDepth"]) +
+            5.0 * (float(params["stepSize"]) ** 2) +
+            0.5 * max(0, float(params["subsamplingRate"]) - 0.7)
+        )
+        penalized_loss = val_rmse + penalty
+
+        return {
+            "loss": penalized_loss,
+            "status": STATUS_OK,
+            "eval_rmse": val_rmse,
+            "penalty": penalty,
+            "params": params
+        }
 
     space = {
-        "maxDepth": scope.int(hp.quniform("maxDepth",  2,   5,   1)),
-        "maxIter":  scope.int(hp.quniform("maxIter",  30, 70, 10)),
-        "stepSize":        hp.loguniform("stepSize", -4.5,  -2),
-        "subsamplingRate": hp.uniform("subsamplingRate", 0.6, 0.9)
+        "maxDepth": scope.int(hp.quniform("maxDepth", 2, 4, 1)),
+        "maxIter": scope.int(hp.quniform("maxIter", 50, 150, 10)),
+        "stepSize": hp.uniform("stepSize", 0.05, 0.4),
+        "featureSubsetStrategy": hp.choice("featureSubsetStrategy", ["sqrt", "onethird", "log2", "0.5"]),
+        "subsamplingRate": hp.uniform("subsamplingRate", 0.5, 0.9),
+        "minInstancesPerNode": scope.int(hp.quniform("minInstancesPerNode", 10, 80, 5)),
+        "maxBins": scope.int(hp.quniform("maxBins", 16, 128, 8))
     }
+
     trials = Trials()
-    best = fmin(objective, space, algo=tpe.suggest, max_evals=max_evals, trials=trials)
+    best = fmin(
+        fn=objective,
+        space=space,
+        algo=tpe.suggest,
+        max_evals=max_evals,
+        trials=trials,
+        rstate=np.random.default_rng(42)
+    )
+
     logger.info(f"Hyperopt best params: {best}")
     return best, trials
-
-#maxDepth': np.float64(5.0), 'maxIter': np.float64(70.0), 'stepSize': np.float64(0.1530311792275945), 'subsamplingRate': np.float64(0.9024031209262541)

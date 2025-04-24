@@ -30,7 +30,8 @@ from src.model.model_building import (
     save_model,
     load_model,
     analyze_feature_importance,
-    hyperopt_gbt
+    hyperopt_gbt,
+    hybrid_time_validation
 )
 from src.model.data_processing import add_unified_features, validate_data, prepare_training_data
 
@@ -59,7 +60,7 @@ def build_model_for_2024(spark):
         save = input("Save raw data to db? (y/n): ").strip().lower()
 
         # 1) Load & preprocess
-        df = assemble_and_pass(spark, START_DATE, END_DATE, save, 'save', 'historical_2024')
+        df = assemble_and_pass(spark, START_DATE, END_DATE, False, save, 'save', 'historical_2024')
         df = add_unified_features(df).withColumn("is_future", lit(False))
 
         if not validate_data(df):
@@ -67,7 +68,8 @@ def build_model_for_2024(spark):
             return
 
         # 2) Time‑based split into train / test
-        train_df, test_df = prepare_training_data(df, test_ratio=0.2)
+        splits = hybrid_time_validation(df)
+        train_df, test_df = splits[0]
 
         # 3) Build base pipeline (assembler + scaler only)
         base_pipe, feature_cols = build_improved_model_pipeline()
@@ -83,7 +85,7 @@ def build_model_for_2024(spark):
             val_small, 
             assembler_stage, 
             scaler_stage,
-            max_evals=50
+            max_evals=10
         )
         logger.info(f"Hyperopt returned: {best_params}")
 
@@ -93,10 +95,11 @@ def build_model_for_2024(spark):
             featuresCol="features",
             maxDepth=int(best_params["maxDepth"]),
             maxIter=int(best_params["maxIter"]),
+            featureSubsetStrategy=str(best_params["featureSubsetStrategy"]),
             stepSize=best_params["stepSize"],
             subsamplingRate=best_params["subsamplingRate"],
             seed=MODEL_PARAMS.get("seed", 42)
-        )
+)
         full_pipeline = Pipeline(stages=[assembler_stage, scaler_stage, gbt])
 
         # 7) Train on full train_df
@@ -166,31 +169,38 @@ def interact_with_db():
 
 
 def load_latest_and_predict(spark: SparkSession, model_dir=MODEL_DIR):
-    logger.info("Loading latest model for prediction...")
+    logger.info("Loading latest GBT + Residual models for prediction...")
     try:
         model_folders = [
             f for f in os.listdir(model_dir)
             if os.path.isdir(os.path.join(model_dir, f)) and "pm10_gbt_model" in f
         ]
         if not model_folders:
-            logger.error("No model found in the model directory.")
+            logger.error("No GBT model found.")
             return
 
         latest_model = sorted(model_folders)[-1]
         model_path   = os.path.join(model_dir, latest_model)
+        gbt_model    = load_model(model_path)
 
-        model = load_model(model_path)
-        logger.info(f"Model loaded from {model_path}")
-        predict_future_air_quality(spark, model)
+        # Try matching residual model folder
+        residual_path = model_path.replace("pm10_gbt_model", "pm10_res_model")
+        if not os.path.exists(residual_path):
+            logger.warning("Residual model not found, using GBT only.")
+            return predict_future_air_quality(spark, gbt_model)
+
+        residual_model = load_model(residual_path)
+        logger.info(f"GBT model: {model_path}, Residual model: {residual_path}")
+        predict_future_air_quality(spark, gbt_model, residual_model=residual_model)
 
     except Exception as e:
-        logger.error(f"Failed to load model or predict: {str(e)}")
+        logger.error(f"Failed to load models: {str(e)}")
 
 
 def display_menu():
     print("\n==================== PM10 Prediction Pipeline Menu ====================")
-    print("1. Build model for 2024")
-    print("   - Build the model from scratch using historical Open-Meteo data for 2024.")
+    print("1. Build model")
+    print("   - Build the model from scratch using historical Open-Meteo data.")
     print("2. Fetch current sensor data")
     print("   - Start continuous tracking and storage of current sensor readings.")
     print("3. Create database query.")
@@ -205,9 +215,9 @@ def main():
     spark = None
     try:
         spark = create_spark_session()
-        if not check_db_ready():
-            logger.error("Database is not available. Exiting...")
-            sys.exit(1)
+        # if not check_db_ready():
+        #     logger.error("Database is not available. Exiting...")
+        #     sys.exit(1)
 
         while True:
             choice = display_menu()

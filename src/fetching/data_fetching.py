@@ -56,7 +56,7 @@ def historical_air_quality(start_date, end_date):
         params={
             "latitude": DEBRECEN_LAT,
             "longitude": DEBRECEN_LON,
-            "hourly": ["pm10", "pm2_5"],
+            "hourly": ["pm10"],
             "start_date": start_date,
             "end_date": end_date
         }
@@ -82,8 +82,7 @@ def historical_air_quality(start_date, end_date):
                 freq=pd.Timedelta(seconds=interval),
                 inclusive="left"
             ).tz_localize(None),
-            "pm10": aq_hourly.Variables(0).ValuesAsNumpy(),
-            "pm2_5": aq_hourly.Variables(1).ValuesAsNumpy()
+            "pm10": aq_hourly.Variables(0).ValuesAsNumpy()
         }
         return pd.DataFrame(aq_data)
     except AttributeError as e:
@@ -101,7 +100,7 @@ def historical_weather(start_date, end_date):
             "hourly": [
                 "temperature_2m", "relative_humidity_2m",
                 "surface_pressure", "wind_speed_10m",
-                "wind_direction_10m"
+                "wind_direction_10m", "precipitation"
             ]
             }
         )
@@ -120,7 +119,8 @@ def historical_weather(start_date, end_date):
         "humidity": weather_hourly.Variables(1).ValuesAsNumpy(),
         "pressure": weather_hourly.Variables(2).ValuesAsNumpy(),
         "wind_speed": weather_hourly.Variables(3).ValuesAsNumpy(),
-        "wind_dir": weather_hourly.Variables(4).ValuesAsNumpy()
+        "wind_dir": weather_hourly.Variables(4).ValuesAsNumpy(),
+        "precipitation": weather_hourly.Variables(5).ValuesAsNumpy()
     }
     weather_df = pd.DataFrame(weather_data)
     return weather_df
@@ -134,7 +134,7 @@ def future_weather(start_date, end_date):
             "hourly": [
                 "temperature_2m", "relative_humidity_2m",
                 "surface_pressure", "wind_speed_10m",
-                "wind_direction_10m"
+                "wind_direction_10m", "precipitation"
                 ],
                 "start_date": start_date,
                 "end_date": end_date
@@ -155,34 +155,87 @@ def future_weather(start_date, end_date):
         "humidity": weather_hourly.Variables(1).ValuesAsNumpy(),
         "pressure": weather_hourly.Variables(2).ValuesAsNumpy(),
         "wind_speed": weather_hourly.Variables(3).ValuesAsNumpy(),
-        "wind_dir": weather_hourly.Variables(4).ValuesAsNumpy()
+        "wind_dir": weather_hourly.Variables(4).ValuesAsNumpy(),
+        "precipitation": weather_hourly.Variables(5).ValuesAsNumpy()
     }
     weather_df = pd.DataFrame(weather_data)
     return weather_df
 
-def assemble_and_pass(spark, start_date, end_date, is_future = 'False', redownload = 'n', db_operation = '', table = ''):
+def assemble_and_pass(spark, start_date, end_date, is_future=False, redownload='n', db_operation='', table=''):
     """
-    Fetch historical air quality and weather data for model building or prediction (default is model building).
+    Fetch historical or future air quality and weather data, merge with hourly continuity, enrich,
+    and optionally save or return as Spark DataFrame.
 
     Parameters:
         spark: SparkSession object.
+        start_date, end_date: datetime.date objects.
+        is_future: If True, fetch future weather and real AQ data only up to 'now', then pad.
+        redownload: 'y' to save to DB.
+        db_operation: write mode for DB.
+        table: target DB table name.
 
     Returns:
-        Spark DataFrame with merged data.
+        Spark DataFrame or boolean (depending on `redownload`).
     """
-    try:
-        aq_df = historical_air_quality(start_date.isoformat(),end_date.isoformat())
-        weather_df = historical_weather(start_date.isoformat(),end_date.isoformat())
+    from datetime import datetime
+    from pyspark.sql.functions import col, lit
+    import pandas as pd
 
-        # Merge datasets
-        extra_cols = {"elevation": DEBRECEN_ELEVATION, "is_urban": True, "is_future": is_future}
-        merged_spark_df = assemble_dataframe(spark, [aq_df, weather_df], join_key="datetime", how="inner", extra_columns=extra_cols)
-        merged_spark_df = merged_spark_df.dropDuplicates(['datetime'])
-        final_df = optimize_dataframe(merged_spark_df, partition_cols="datetime", partition_count=48)
-        db_columns = ["datetime", "pm10", "pm2_5", "temperature", "humidity", 
-                      "pressure", "wind_speed", "wind_dir", "elevation", "is_urban", "is_future"]
+    try:
+        now = datetime.now().replace(minute=0, second=0, microsecond=0)
+
+        if not is_future:
+            # ✅ Historical path
+            aq_df = historical_air_quality(start_date.isoformat(), end_date.isoformat())
+            weather_df = historical_weather(start_date.isoformat(), end_date.isoformat())
+
+            if aq_df is None or weather_df is None:
+                logger.error("One of the required dataframes is None — aborting assemble_and_pass.")
+                return None
+
+            extra_cols = {"elevation": DEBRECEN_ELEVATION, "is_urban": True, "is_future": False}
+            merged_spark_df = assemble_dataframe(spark, [aq_df, weather_df], join_key="datetime", how="inner", extra_columns=extra_cols)
+            merged_spark_df = merged_spark_df.dropDuplicates(['datetime'])
+            final_df = optimize_dataframe(merged_spark_df, partition_cols="datetime", partition_count=48)
+
+        else:
+            # ✅ Future logic with timeline + patching
+            aq_end = min(end_date, now.date())
+            aq_df = historical_air_quality(start_date.isoformat(), aq_end.isoformat())
+            weather_df = future_weather(start_date.isoformat(), end_date.isoformat())
+
+            if aq_df is None or weather_df is None:
+                logger.error("One of the required dataframes is None — aborting assemble_and_pass.")
+                return None
+
+            # Build full hourly timeline
+            all_hours = pd.DataFrame({
+                "datetime": pd.date_range(start=start_date, end=end_date, freq="H")
+            })
+
+            # Merge timeline with weather and AQ
+            df = pd.merge(all_hours, weather_df, on="datetime", how="left")
+            df = pd.merge(df, aq_df[['datetime', 'pm10']], on="datetime", how="left")
+
+            # Inject constants
+            df['elevation'] = DEBRECEN_ELEVATION
+            df['is_urban'] = True
+            df['is_future'] = df['datetime'] > now
+
+            # Patch PM10 after now
+            df['pm10'] = df.apply(lambda row: 0.0 if row['datetime'] > now else row['pm10'], axis=1)
+
+            # Convert to Spark
+            merged_spark_df = spark.createDataFrame(df)
+
+            # Optimize
+            final_df = optimize_dataframe(merged_spark_df, partition_cols="datetime", partition_count=48)
+
+        # Final cleanup
+        db_columns = ["datetime", "pm10", "temperature", "humidity",
+                      "pressure", "wind_speed", "wind_dir", "precipitation",
+                      "elevation", "is_urban", "is_future"]
         db_df = final_df.select(*db_columns)
-        
 
         if redownload == 'y':
             success = db_data_transaction(spark, db_operation, table, data=db_df)
@@ -192,19 +245,19 @@ def assemble_and_pass(spark, start_date, end_date, is_future = 'False', redownlo
         else:
             logger.info("Data successfully extracted.")
             return db_df
-            
+
     except Exception as e:
-        logger.error(f"Error fetching data: {str(e)}")
+        logger.error(f"Error in assemble_and_pass: {str(e)}", exc_info=True)
         raise
 
-def fetch_current_data(spark, field_id2=2, field_id4=4, results=1):
+
+def fetch_current_data(spark, field_id2=2, results=1):
     """
     Fetch and merge current sensor data from ThingSpeak and weather data from OpenWeather.
 
     Parameters:
         spark: SparkSession object.
         field_id2 (int): ThingSpeak field ID for pm10.
-        field_id4 (int): ThingSpeak field ID for pm2_5.
         results (int): Number of data points to retrieve.
 
     Returns:
@@ -228,16 +281,14 @@ def fetch_current_data(spark, field_id2=2, field_id4=4, results=1):
                 dt = datetime.now(pytz.UTC)
             else:
                 dt = dt.tz_localize(None)
-            if entry.get(f"field{field_id2}") and entry.get(f"field{field_id4}"):
+            if entry.get(f"field{field_id2}"):
                 try:
                     pm10_val = float(entry[f"field{field_id2}"])
-                    pm2_5_val = float(entry[f"field{field_id4}"])
                 except (ValueError, TypeError):
                     continue
                 records.append({
                     "datetime": dt,
-                    f"field{field_id2}": pm10_val,
-                    f"field{field_id4}": pm2_5_val
+                    f"field{field_id2}": pm10_val
                 })
         if not records:
             logger.warning("No valid ThingSpeak records found")
@@ -286,11 +337,10 @@ def fetch_current_data(spark, field_id2=2, field_id4=4, results=1):
         )
         merged_df = merged_df.dropDuplicates(["datetime"])
         merged_df = merged_df.withColumn("datetime", col("datetime").cast("timestamp"))
-        db_columns = ["datetime", "pm10", "pm2_5", "temperature", "humidity", 
+        db_columns = ["datetime", "pm10", "temperature", "humidity", 
                       "pressure", "wind_speed", "wind_dir", "elevation", "is_urban"]
         field_map = {
-            f"field{field_id2}": "pm10",
-            f"field{field_id4}": "pm2_5"
+            f"field{field_id2}": "pm10"
         }
         for field, col_name in field_map.items():
             if field in merged_df.columns:
@@ -313,34 +363,41 @@ def fetch_current_data(spark, field_id2=2, field_id4=4, results=1):
 
 def get_prediction_input_data(spark):
     """
-    Fetch last 90 days of AQ+weather, then next 14 days of weather (with a 1-day overlap),
+    Fetch last 90 days of AQ+weather, then next 14 days of weather,
     stitch together, flag true future rows, run feature pipelines, and split out
     the final historical and future Spark DataFrames.
     """
     try:
         # 1) parameters & fetch history
-        today    = datetime.today().date() - timedelta(days=1)
-        past_90  = today - timedelta(days=90)
+        today = datetime.today().date() - timedelta(days=1)
+        past_90 = today - timedelta(days=90)
         hist_spark = assemble_and_pass(spark, past_90, today, False, 'n', '', '')
-        hist_df    = hist_spark.toPandas()
+        hist_df = hist_spark.toPandas()
         logger.info(f"Historical data shape: {hist_df.shape}")
 
-        # 2) fetch future-weather from yesterday → today+14
-        fut_start = (today - timedelta(days=2)).strftime('%Y-%m-%d')
-        fut_end   = (today + timedelta(days=14)).strftime('%Y-%m-%d')
+        # 2) fetch future-weather using assemble_and_pass
+        fut_start = (today - timedelta(days=3)).strftime('%Y-%m-%d')
+        fut_end = (today + timedelta(days=14)).strftime('%Y-%m-%d')
         logger.info(f"Requesting future weather from {fut_start} to {fut_end}")
-        fut_df = future_weather(fut_start, fut_end)
-        if fut_df is None:
-            return None
+        fut_df_spark = assemble_and_pass(
+            spark,
+            datetime.strptime(fut_start, "%Y-%m-%d").date(),
+            datetime.strptime(fut_end, "%Y-%m-%d").date(),
+            True,
+            'n',
+            '',
+            ''
+        )
+        fut_df = fut_df_spark.toPandas()
         fut_df['datetime'] = pd.to_datetime(fut_df['datetime']).dt.floor('H')
         logger.info(f"Future weather shape: {fut_df.shape}")
 
         # 3) set up the full schema
         db_columns = [
-            "datetime","pm10","pm2_5",
-            "temperature","humidity","pressure",
-            "wind_speed","wind_dir",
-            "elevation","is_urban","is_future"
+            "datetime", "pm10",
+            "temperature", "humidity", "pressure",
+            "wind_speed", "wind_dir",
+            "elevation", "is_urban", "is_future"
         ]
 
         # 4) stitch & dedupe & sort
@@ -352,39 +409,32 @@ def get_prediction_input_data(spark):
             .reset_index(drop=True)
         )
 
-        # 5) re-assign is_future based on last real history
-        last_hist = hist_df['datetime'].max()
-        wf['is_future'] = wf['datetime'] > last_hist
-
-        # 6) fill in the remaining columns for both blocks
-        wf['is_urban']  = True
-        wf['elevation'] = DEBRECEN_ELEVATION
-        for c in ['pm10','pm2_5']:
+        # 5) fill in missing PM column if needed
+        for c in ['pm10']:
             if c not in wf.columns:
                 wf[c] = None
 
-        # 7) select & reorder to match db_columns
+        # 6) select & reorder to match db_columns
         combo = wf[db_columns]
 
-        # 8) back to Spark & feature pipelines
+        # 7) back to Spark & feature pipelines
         sdf = spark.createDataFrame(combo)
         sdf = add_unified_features(sdf)
-        sdf.orderBy("datetime").show(200, truncate=False)
 
         if not validate_data(sdf):
             return None
 
-        # 9) split final DFs
+        # 8) split final DFs
         hist_spark = sdf.filter(col('is_future') == False).filter(col('pm10').isNotNull())
         future_spark = sdf.filter(col('is_future') == True).select(
             'datetime', 'temperature', 'humidity', 'pressure', 'wind_speed', 'wind_dir'
         )
 
-        # 10) debug prints
+        # 9) debug prints
         print("\n=== LAST HISTORICAL RECORDS ===")
-        hist_spark.orderBy(col("datetime").desc()).show(5, truncate=False)
+        hist_spark.orderBy(col("datetime").desc()).show(1, truncate=False)
         print("\n=== FIRST FUTURE RECORDS ===")
-        future_spark.orderBy("datetime").show(5, truncate=False)
+        future_spark.orderBy("datetime").show(1, truncate=False)
 
         return hist_spark, future_spark
 
