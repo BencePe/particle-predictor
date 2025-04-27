@@ -377,55 +377,71 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
         std_importance = importances.std()
         top_3_sum = np.sort(importances)[-3:].sum()  # Sum of top 3 feature importances
         
-        # 1. Stronger imbalance penalty with progressive scaling
-        imbalance_penalty = 0.3
-        if max_importance > 0.10:  # Lower threshold (was 0.20)
-            # Exponential penalty that increases more severely with higher importance
-            imbalance_penalty = (max_importance - 0.20) * 33.0 * (1.0 + max_importance)
+        # 1. Imbalance penalty with progressive scaling - reduced weight
+        imbalance_penalty = 0.0
+        if max_importance > 0.15:  # Adjusted threshold (was 0.10)
+            # Linear penalty with gentler scaling
+            imbalance_penalty = (max_importance - 0.15) * 15.0  # Reduced from 33.0 * (1.0 + max_importance)
             
-        # 2. Specific penalty for 3h_pm10_avg if it's dominant
-        pm10_avg_penalty = 0.5
-        if pm10_avg_importance > 0.15:  # Apply special penalty for this feature
-            pm10_avg_penalty = (pm10_avg_importance - 0.25) * 25.0
+        # 2. Progressive penalty for 3h_pm10_avg
+        pm10_avg_penalty = 0.0
+        if pm10_avg_importance > 0:
+            # Base penalty for any usage
+            pm10_avg_penalty = 0.8
             
-        # 3. Penalty for having a few dominant features (concentration penalty)
-        concentration_penalty = 0.5
-        if top_3_sum > 0.6:  # If top 3 features account for more than 60%
-            concentration_penalty = (top_3_sum - 0.6) * 10.0
+            # Progressive penalty based on importance level
+            if pm10_avg_importance > 0.05:
+                pm10_avg_penalty += (pm10_avg_importance - 0.05) * 10.0
+                
+            if pm10_avg_importance > 0.15:
+                pm10_avg_penalty += (pm10_avg_importance - 0.15) * 20.0
+            
+        # 3. Penalty for having a few dominant features - reduced weight
+        concentration_penalty = 0.0
+        if top_3_sum > 0.65:  # Relaxed threshold (was 0.6)
+            concentration_penalty = (top_3_sum - 0.65) * 6.0  # Reduced from 10.0
             
         # 4. Standard deviation penalty - reward more balanced distributions
-        distribution_penalty = std_importance * 25.0
+        distribution_penalty = std_importance * 12.0  # Reduced from 25.0
 
-        # 5. Complexity penalty (same as before)
+        # 5. Complexity penalty - adjusted weights
         complexity_penalty = (
-            0.5 * int(params["maxDepth"]) +
-            5.5 * (float(params["stepSize"]) ** 2) +
-            2.0 * max(0, float(params["subsamplingRate"]) - 0.7)
+            0.3 * int(params["maxDepth"]) +  # Reduced from 0.5
+            4.0 * (float(params["stepSize"]) ** 2) +  # Reduced from 5.5
+            1.5 * max(0, float(params["subsamplingRate"]) - 0.65)  # Relaxed threshold (was 0.7) and reduced weight
         )
 
-        # Total penalized loss
+        # Total penalty
         total_penalty = imbalance_penalty + complexity_penalty + \
                         pm10_avg_penalty + concentration_penalty + distribution_penalty
                         
-        penalized_loss = val_rmse + total_penalty
+        # Base loss
+        base_loss = val_rmse + total_penalty
         
-        # Add a hard constraint to reject models where 3h_pm10_avg importance is too high
+        # Add scaled penalty for 3h_pm10_avg instead of hard rejection
+        penalized_loss = base_loss
         if pm10_avg_importance > 0:
-            # Increase the penalized loss significantly if 3h_pm10_avg is used at all
-            penalized_loss += 100.0  # This effectively rejects any model that uses this feature
+            # Use a scaled penalty instead of flat 100
+            # Start with moderate penalty that increases with importance
+            scaled_penalty = 3.0 + pm10_avg_importance * 50.0
+            penalized_loss += scaled_penalty
+            logger.info(f"  - Applied 3h_pm10_avg penalty: {scaled_penalty:.2f}")
         
-        logger.info(f"RMSE: {val_rmse:.4f}, Total penalty: {total_penalty:.4f}")
+        logger.info(f"RMSE: {val_rmse:.4f}, Total penalty: {total_penalty:.4f}, Final loss: {penalized_loss:.4f}")
         logger.info(f"  - Max importance: {max_importance:.4f}, 3h_pm10_avg importance: {pm10_avg_importance:.4f}")
         logger.info(f"  - Penalties: imbalance={imbalance_penalty:.2f}, pm10_avg={pm10_avg_penalty:.2f}, " +
                     f"concentration={concentration_penalty:.2f}, distribution={distribution_penalty:.2f}")
         
-        # Check if this is the best model so far (without the hard constraint)
-        # We want models with low RMSE but also well-distributed feature importance
-        compound_loss = val_rmse + total_penalty
+        # Modified best model selection logic
+        # Allow models with some 3h_pm10_avg usage if they're significantly better
+        adjusted_loss = base_loss
+        if pm10_avg_importance > 0:
+            # Add a modest fixed penalty to prefer non-3h_pm10_avg models
+            adjusted_loss += 1.5 * pm10_avg_importance
         
-        # Only consider models where 3h_pm10_avg importance is zero
-        if pm10_avg_importance == 0 and compound_loss < best_loss:
-            best_loss = compound_loss
+        # Update best model if better than current best
+        if adjusted_loss < best_loss:
+            best_loss = adjusted_loss
             best_model = model
             best_metrics = {
                 "rmse": val_rmse,
@@ -433,19 +449,28 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
                 "r2": metrics["r2"],
                 "max_importance": max_importance,
                 "pm10_avg_importance": pm10_avg_importance,
+                "penalty": total_penalty,
+                "adjusted_loss": adjusted_loss,
                 "penalties": {
                     "imbalance": imbalance_penalty,
                     "pm10_avg": pm10_avg_penalty,
                     "concentration": concentration_penalty,
-                    "distribution": distribution_penalty
+                    "distribution": distribution_penalty,
+                    "complexity": complexity_penalty
                 }
             }
-            logger.info(f"New best model found! Loss: {compound_loss:.4f}")
+            uses_pm10_avg = "uses 3h_pm10_avg" if pm10_avg_importance > 0 else "without 3h_pm10_avg"
+            logger.info(f"New best model found! Adjusted Loss: {adjusted_loss:.4f}, RMSE: {val_rmse:.4f} ({uses_pm10_avg})")
+            
+            # Special logging for models with exceptional RMSE
+            if val_rmse < 2.3:
+                logger.info(f"Exceptional RMSE model! Params: {params}")
         
         return {
             "loss": penalized_loss,
             "status": STATUS_OK,
             "eval_rmse": val_rmse,
+            "base_loss": base_loss,
             "penalty": total_penalty,
             "imbalance_penalty": imbalance_penalty,
             "pm10_avg_penalty": pm10_avg_penalty,
@@ -457,14 +482,14 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
             "params": params
         }
     
-    # Modified search space to fix the 'size' parameter issue
+    # Modified search space to focus on promising areas
     space = {
-        "maxDepth": hp.choice("maxDepth", [2, 3, 4]),
-        "maxIter": hp.choice("maxIter", [150, 160, 170, 180, 190]),
-        "stepSize": hp.uniform("stepSize", 0.09, 0.11),
+        "maxDepth": hp.choice("maxDepth", [2, 3]),  # Focus on smaller trees
+        "maxIter": hp.choice("maxIter", [160, 170, 180, 190]),
+        "stepSize": hp.uniform("stepSize", 0.09, 0.105),  # Narrower range
         "maxBins": hp.choice("maxBins", [110, 120, 130]),
-        "minInstancesPerNode": hp.choice("minInstancesPerNode", [10, 11, 12, 13, 14]),
-        "subsamplingRate": hp.uniform("subsamplingRate", 0.60, 0.72),
+        "minInstancesPerNode": hp.choice("minInstancesPerNode", [10, 12, 14]),
+        "subsamplingRate": hp.uniform("subsamplingRate", 0.62, 0.70),  # Narrower range
         "featureSubsetStrategy": hp.choice("featureSubsetStrategy", ["log2", "onethird"])
     }
     
@@ -478,12 +503,12 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
         trials=trials
     )
     
-    # Map best params back to their original types/values - modified for hp.choice
+    # Map best params back to their original types/values
     featureSubsetStrategy_options = ["log2", "onethird"]
-    maxDepth_options = [2, 3, 4]
-    maxIter_options = [150, 160, 170, 180, 190]
+    maxDepth_options = [2, 3]
+    maxIter_options = [160, 170, 180, 190]
     maxBins_options = [110, 120, 130]
-    minInstancesPerNode_options = [10, 11, 12, 13, 14]
+    minInstancesPerNode_options = [10, 12, 14]
     
     best_params = {
         "maxDepth": maxDepth_options[best["maxDepth"]],
@@ -500,22 +525,41 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
     # Analyze trials to understand feature importance trends
     logger.info("Analyzing feature importance trends across trials:")
     if trials.trials:
-        # Extract max importance and pm10_avg_importance from each trial
-        max_imps = [t['result'].get('max_feature_importance', 0) for t in trials.trials if 'result' in t]
-        pm10_imps = [t['result'].get('pm10_avg_importance', 0) for t in trials.trials if 'result' in t]
+        # Extract metrics from valid trials
+        valid_trials = [t for t in trials.trials if 'result' in t and isinstance(t['result'], dict)]
         
-        if max_imps:
+        if valid_trials:
+            # Extract various metrics
+            rmses = [t['result'].get('eval_rmse', float('inf')) for t in valid_trials]
+            max_imps = [t['result'].get('max_feature_importance', 0) for t in valid_trials]
+            pm10_imps = [t['result'].get('pm10_avg_importance', 0) for t in valid_trials]
+            
+            # Count models without 3h_pm10_avg
+            models_without_pm10_avg = sum(1 for imp in pm10_imps if imp == 0)
+            
+            # Log statistics
+            logger.info(f"  - RMSE range: {min(rmses):.4f} - {max(rmses):.4f}")
             logger.info(f"  - Max feature importance range: {min(max_imps):.4f} - {max(max_imps):.4f}")
-        if pm10_imps:
             logger.info(f"  - 3h_pm10_avg importance range: {min(pm10_imps):.4f} - {max(pm10_imps):.4f}")
+            logger.info(f"  - Models without 3h_pm10_avg: {models_without_pm10_avg}/{len(valid_trials)}")
+            
+            # Find best RMSE model and report if it uses 3h_pm10_avg
+            best_rmse_idx = np.argmin(rmses)
+            best_rmse = rmses[best_rmse_idx]
+            best_rmse_uses_pm10 = pm10_imps[best_rmse_idx] > 0
+            logger.info(f"  - Best RMSE model: {best_rmse:.4f} (uses 3h_pm10_avg: {best_rmse_uses_pm10})")
     
     # Save the best model if one was found
     if best_model is not None:
         logger.info(f"Saving best model with metrics: {best_metrics}")
         model_path = save_model(best_model, model_name="pm10_gbt_best_hyperopt")
         logger.info(f"Best model saved to: {model_path}")
+        
+        # Log if best model uses 3h_pm10_avg
+        if best_metrics.get("pm10_avg_importance", 0) > 0:
+            logger.info(f"Note: Best model uses 3h_pm10_avg with importance: {best_metrics['pm10_avg_importance']:.4f}")
     else:
-        logger.warning("No suitable model found with 3h_pm10_avg importance = 0")
+        logger.warning("No suitable model found")
     
     return best_params, trials, best_model, best_metrics
 
