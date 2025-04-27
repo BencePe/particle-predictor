@@ -378,15 +378,15 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
         top_3_sum = np.sort(importances)[-3:].sum()  # Sum of top 3 feature importances
         
         # 1. Stronger imbalance penalty with progressive scaling
-        imbalance_penalty = 0.0
-        if max_importance > 0.15:  # Lower threshold (was 0.20)
+        imbalance_penalty = 0.3
+        if max_importance > 0.10:  # Lower threshold (was 0.20)
             # Exponential penalty that increases more severely with higher importance
             imbalance_penalty = (max_importance - 0.20) * 33.0 * (1.0 + max_importance)
             
         # 2. Specific penalty for 3h_pm10_avg if it's dominant
-        pm10_avg_penalty = 1.8
-        if pm10_avg_importance > 0.13:  # Apply special penalty for this feature
-            pm10_avg_penalty = (pm10_avg_importance - 0.26) * 26.0
+        pm10_avg_penalty = 0.5
+        if pm10_avg_importance > 0.15:  # Apply special penalty for this feature
+            pm10_avg_penalty = (pm10_avg_importance - 0.25) * 25.0
             
         # 3. Penalty for having a few dominant features (concentration penalty)
         concentration_penalty = 0.5
@@ -457,18 +457,16 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
             "params": params
         }
     
-    # Modified search space to favor more balanced feature usage
+    # Modified search space to fix the 'size' parameter issue
     space = {
-        "maxDepth": scope.int(hp.quniform("maxDepth", 2, 3, 4)),
-        "maxIter": scope.int(hp.quniform("maxIter", 150, 160, 170, 180, 190)),
-        "stepSize": hp.uniform("stepSize", 0.09, 0.095, 0.1, 0.105, 0.11),
-        "maxBins": scope.int(hp.quniform("maxBins", 110, 120, 130)),
-        "minInstancesPerNode": scope.int(hp.quniform("minInstancesPerNode", 10, 11, 12, 13, 14)),
-        "subsamplingRate": hp.uniform("subsamplingRate", 0.60, 0.64, 0.68, 0.72),
-        "featureSubsetStrategy": hp.choice("featureSubsetStrategy", ["sqrt", "log2", "onethird"])
+        "maxDepth": hp.choice("maxDepth", [2, 3, 4]),
+        "maxIter": hp.choice("maxIter", [150, 160, 170, 180, 190]),
+        "stepSize": hp.uniform("stepSize", 0.09, 0.11),
+        "maxBins": hp.choice("maxBins", [110, 120, 130]),
+        "minInstancesPerNode": hp.choice("minInstancesPerNode", [10, 11, 12, 13, 14]),
+        "subsamplingRate": hp.uniform("subsamplingRate", 0.60, 0.72),
+        "featureSubsetStrategy": hp.choice("featureSubsetStrategy", ["log2", "onethird"])
     }
-    
-    # {'maxDepth': 3, 'maxIter': 170, 'stepSize': 0.09462168546058104, 'maxBins': 120, 'minInstancesPerNode': 12, 'subsamplingRate': 0.6423147938022961, 'featureSubsetStrategy': 'log2'}
     
     # Run optimization
     trials = Trials()
@@ -480,15 +478,21 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
         trials=trials
     )
     
-    # Map best params back to their original types/values
+    # Map best params back to their original types/values - modified for hp.choice
+    featureSubsetStrategy_options = ["log2", "onethird"]
+    maxDepth_options = [2, 3, 4]
+    maxIter_options = [150, 160, 170, 180, 190]
+    maxBins_options = [110, 120, 130]
+    minInstancesPerNode_options = [10, 11, 12, 13, 14]
+    
     best_params = {
-        "maxDepth": int(best["maxDepth"]),
-        "maxIter": int(best["maxIter"]),
+        "maxDepth": maxDepth_options[best["maxDepth"]],
+        "maxIter": maxIter_options[best["maxIter"]],
         "stepSize": float(best["stepSize"]),
-        "maxBins": int(best["maxBins"]),
-        "minInstancesPerNode": int(best["minInstancesPerNode"]),
+        "maxBins": maxBins_options[best["maxBins"]],
+        "minInstancesPerNode": minInstancesPerNode_options[best["minInstancesPerNode"]],
         "subsamplingRate": float(best["subsamplingRate"]),
-        "featureSubsetStrategy": ["sqrt", "log2", "onethird"][best["featureSubsetStrategy"]]
+        "featureSubsetStrategy": featureSubsetStrategy_options[best["featureSubsetStrategy"]]
     }
     
     logger.info(f"Best hyperparameters: {best_params}")
