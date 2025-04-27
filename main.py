@@ -3,13 +3,17 @@
 Main entry point for the PM10 prediction application.
 """
 
+from datetime import datetime
 import os
 import sys
 import logging
 import time
+from xml.sax.handler import all_features
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import lit
+from pyspark.sql import functions as F
+
 
 from pyspark.ml import Pipeline
 from pyspark.ml.regression import GBTRegressor
@@ -31,9 +35,11 @@ from src.model.model_building import (
     load_model,
     analyze_feature_importance,
     hyperopt_gbt,
-    hybrid_time_validation
+    hybrid_time_validation,
+    plot_model_comparison,
+    train_with_hybrid_cv
 )
-from src.model.data_processing import add_unified_features, validate_data, prepare_training_data
+from src.model.data_processing import add_unified_features, validate_data
 
 from src.config import MODEL_DIR, FEATURE_COLUMNS, START_DATE, END_DATE, MODEL_PARAMS
 
@@ -61,35 +67,38 @@ def build_model_for_2024(spark):
 
         # 1) Load & preprocess
         df = assemble_and_pass(spark, START_DATE, END_DATE, False, save, 'save', 'historical_2024')
+        
         df = add_unified_features(df).withColumn("is_future", lit(False))
-
-        if not validate_data(df):
-            logger.error("Data validation failed.")
-            return
 
         # 2) Time‑based split into train / test
         splits = hybrid_time_validation(df)
-        train_df, test_df = splits[0]
+        train_df, test_df = splits[0]  # Use first split for main training/testing
 
-        # 3) Build base pipeline (assembler + scaler only)
-        base_pipe, feature_cols = build_improved_model_pipeline()
+        # 3) Build base pipeline
+        base_pipe, feature_cols  = build_improved_model_pipeline()
+        
+        # 4) Run Hybrid CV on untuned base pipeline
+        # logger.info("Evaluating base pipeline with hybrid CV...")
+        # base_cv_metrics = train_with_hybrid_cv(df, build_improved_model_pipeline)
+        # logger.info(f"Baseline Hybrid CV metrics (untuned pipeline): {base_cv_metrics}")
+
+        # 6) Extract assembler and scaler for hyperopt reuse
         assembler_stage, scaler_stage = base_pipe.getStages()
 
-        # 4) Further split train_df → train_small / val_small for Hyperopt
+        # 7) Split into small train/val sets for Hyperopt
         train_small, val_small = train_df.randomSplit([0.9, 0.1], seed=42)
 
-
-        # 5) Hyperopt search for best GBT params
-        best_params, trials = hyperopt_gbt(
-            train_small, 
-            val_small, 
-            assembler_stage, 
+        # 8) Hyperopt search for best GBT params
+        best_params, trials, best_model, best_metrics = hyperopt_gbt(
+            train_small,
+            val_small,
+            assembler_stage,
             scaler_stage,
-            max_evals=10
+            max_evals=120,
         )
         logger.info(f"Hyperopt returned: {best_params}")
 
-        # 6) Build final GBT regressor with best params
+        # 9) Build final GBT regressor with best params
         gbt = GBTRegressor(
             labelCol="pm10",
             featuresCol="features",
@@ -99,29 +108,52 @@ def build_model_for_2024(spark):
             stepSize=best_params["stepSize"],
             subsamplingRate=best_params["subsamplingRate"],
             seed=MODEL_PARAMS.get("seed", 42)
-)
+        )
         full_pipeline = Pipeline(stages=[assembler_stage, scaler_stage, gbt])
 
-        # 7) Train on full train_df
+        # 10) Train tuned model
         model = train_model(full_pipeline, train_df)
 
-        # 8) Feature importance on the tuned model
-        analyze_feature_importance(model, feature_cols)
+        # 11) Feature importance
+        # analyze_feature_importance(model, feature_cols)
 
-        # 9) Build & train residual‑stacking model
+        # 13) Evaluate tuned model
+        tuned_metrics = evaluate_model(model, test_df)
+        logger.info(f"Base GBT metrics on test set: {tuned_metrics}")
+
+        # 14) Generate residuals for residual model training/evaluation
+        test_df_with_residuals = model.transform(test_df).withColumn(
+            "residual", 
+            F.col("pm10") - F.col("prediction")  # Calculate actual residuals
+        )
+        
+        # 12) Build and train residual-stacking model
         res_model = build_residual_pipeline(model, train_df, feature_cols)
 
-        # 10) Evaluate both base & residual forecasts on held‑out test_df
-        # 10a) Base RMSE
-        base_metrics = evaluate_model(model, test_df, prediction_col="prediction")
-        logger.info(f"Base GBT metrics on test set: {base_metrics}")
+        # 16) Evaluate residual model predictions (now using residuals as labels)
+        resid_metrics = evaluate_model(
+            res_model, 
+            test_df_with_residuals,  # Use the DF with residuals
+            prediction_col="residual_prediction",
+            label_col="residual"  # Critical: evaluate against residuals
+        )
+        logger.info(f"Residual model metrics: {resid_metrics}")
 
-        # 10b) Residual‑corrected RMSE
-        corrected = apply_residual_correction(model, res_model, test_df)
-        resid_metrics = evaluate_model(corrected, None, prediction_col="final_prediction", is_transformed=True)
-        logger.info(f"Residual‑stacked metrics on test set: {resid_metrics}")
+        # 17) Apply residual correction
+        corrected_df = apply_residual_correction(model, res_model, test_df)
 
-        # 11) Save both models
+        # 18) Plot findings
+        plot_model_comparison(
+        model, 
+        res_model, 
+        test_df, 
+        corrected_df, 
+        tuned_metrics,  # Previously using 'base_metrics' which wasn't defined
+        resid_metrics,  # This was correct
+        feature_cols=FEATURE_COLUMNS  # Pass the feature columns for importance analysis
+    )
+        
+        # 19) Save both models
         gbt_path = save_model(model, model_name="pm10_gbt_model")
         resid_path = save_model(res_model, model_name="pm10_res_model")
         logger.info(f"Models saved:\n • GBT: {gbt_path}\n • Residual: {resid_path}")
@@ -129,10 +161,11 @@ def build_model_for_2024(spark):
         return {
             "model": model,
             "residual_model": res_model,
-            "base_metrics": base_metrics,
+            "tuned_metrics": tuned_metrics,
             "resid_metrics": resid_metrics
         }
 
+        
     except Exception as e:
         logger.error(f"Error building model for 2024: {str(e)}", exc_info=True)
 
@@ -167,34 +200,48 @@ def interact_with_db():
     else:
         print("Query failed.")
 
+def extract_timestamp(name: str) -> datetime:
+    try:
+        return datetime.strptime(name.split("_")[-1], "%Y%m%d%H%M%S")
+    except Exception:
+        return datetime.min
 
 def load_latest_and_predict(spark: SparkSession, model_dir=MODEL_DIR):
     logger.info("Loading latest GBT + Residual models for prediction...")
     try:
-        model_folders = [
-            f for f in os.listdir(model_dir)
-            if os.path.isdir(os.path.join(model_dir, f)) and "pm10_gbt_model" in f
-        ]
-        if not model_folders:
+        available_models = os.listdir(model_dir)
+        logger.info(f"Available models in {model_dir}: {available_models}")
+
+        # 1. Load latest GBT model
+        gbt_models = [f for f in available_models if "pm10_gbt_model" in f]
+        if not gbt_models:
             logger.error("No GBT model found.")
             return
+        latest_gbt = sorted(gbt_models, key=extract_timestamp)[-1]
+        gbt_path = os.path.join(model_dir, latest_gbt)
+        gbt_model = load_model(gbt_path)
 
-        latest_model = sorted(model_folders)[-1]
-        model_path   = os.path.join(model_dir, latest_model)
-        gbt_model    = load_model(model_path)
+        # 2. Load latest available residual model
+        residual_models = [f for f in available_models if "pm10_res_model" in f]
+        residual_model = None
+        if residual_models:
+            latest_res = sorted(residual_models, key=extract_timestamp)[-1]
+            residual_path = os.path.join(model_dir, latest_res)
+            if os.path.exists(residual_path):
+                try:
+                    residual_model = load_model(residual_path)
+                    logger.info(f"Residual model loaded from: {residual_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to load residual model: {e}")
+        else:
+            logger.warning("No residual model found. Using GBT only.")
 
-        # Try matching residual model folder
-        residual_path = model_path.replace("pm10_gbt_model", "pm10_res_model")
-        if not os.path.exists(residual_path):
-            logger.warning("Residual model not found, using GBT only.")
-            return predict_future_air_quality(spark, gbt_model)
-
-        residual_model = load_model(residual_path)
-        logger.info(f"GBT model: {model_path}, Residual model: {residual_path}")
+        logger.info(f"Using GBT model: {gbt_path}")
         predict_future_air_quality(spark, gbt_model, residual_model=residual_model)
 
     except Exception as e:
-        logger.error(f"Failed to load models: {str(e)}")
+        logger.error(f"Failed to load models: {str(e)}", exc_info=True)
+
 
 
 def display_menu():

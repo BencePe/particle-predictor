@@ -27,7 +27,7 @@ from src.model.data_processing import add_unified_features, add_urban_features, 
 logger = logging.getLogger(__name__)
 
 # Configure Open-Meteo API client
-cache_session = requests_cache.CachedSession('.cache', expire_after=3600)
+cache_session = requests_cache.CachedSession('.cache', expire_after=30)
 retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
 openmeteo = openmeteo_requests.Client(session=retry_session)
 
@@ -393,12 +393,9 @@ def get_prediction_input_data(spark):
         logger.info(f"Future weather shape: {fut_df.shape}")
 
         # 3) set up the full schema
-        db_columns = [
-            "datetime", "pm10",
-            "temperature", "humidity", "pressure",
-            "wind_speed", "wind_dir",
-            "elevation", "is_urban", "is_future"
-        ]
+        db_columns = ["datetime", "pm10", "temperature", "humidity",
+                      "pressure", "wind_speed", "wind_dir", "precipitation",
+                      "elevation", "is_urban", "is_future"]
 
         # 4) stitch & dedupe & sort
         wf = pd.concat([hist_df, fut_df], ignore_index=True)
@@ -421,20 +418,20 @@ def get_prediction_input_data(spark):
         sdf = spark.createDataFrame(combo)
         sdf = add_unified_features(sdf)
 
-        if not validate_data(sdf):
-            return None
+        # if not validate_data(sdf):
+        #     return None
 
         # 8) split final DFs
         hist_spark = sdf.filter(col('is_future') == False).filter(col('pm10').isNotNull())
         future_spark = sdf.filter(col('is_future') == True).select(
-            'datetime', 'temperature', 'humidity', 'pressure', 'wind_speed', 'wind_dir'
+            'datetime', 'temperature', 'humidity', 'pressure', 'wind_speed', 'wind_dir','precipitation', "elevation", "is_urban", "is_future"
         )
 
         # 9) debug prints
         print("\n=== LAST HISTORICAL RECORDS ===")
-        hist_spark.orderBy(col("datetime").desc()).show(1, truncate=False)
+        hist_spark.orderBy(col("datetime").desc()).show(3, truncate=False)
         print("\n=== FIRST FUTURE RECORDS ===")
-        future_spark.orderBy("datetime").show(1, truncate=False)
+        future_spark.orderBy("datetime").show(3, truncate=False)
 
         return hist_spark, future_spark
 
