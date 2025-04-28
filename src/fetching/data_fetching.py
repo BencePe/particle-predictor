@@ -22,7 +22,7 @@ from src.config import (
 from src.db.db_operations import db_data_transaction
 from src.dataframe.assemble_dataframe import assemble_dataframe
 from src.dataframe.optimize_dataframe import optimize_dataframe
-from src.model.data_processing import add_unified_features, add_urban_features, validate_data
+from src.model.data_processing import add_unified_features
 
 logger = logging.getLogger(__name__)
 

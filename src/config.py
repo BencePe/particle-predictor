@@ -71,30 +71,28 @@ DB_CONFIG = {
 }
 
 FEATURE_COLUMNS = [
-    # Core measurements (4)
-    "pm10", "temperature", "humidity", "wind_speed", "precipitation",
-    
-    # Temporal & cyclical
-    "hour_sin", "hour_cos", "month_sin", "winter_indicator",
-    
-    # Critical lags (2)
-    "pm10_lag3", "pm10_lag24",
-    
-    # Essential rolling stats (4)
-    "3h_pm10_avg", "24h_pm10_avg", "3h_pm10_std", "weekly_pm10_std", "3h_temp_avg",  
-    "3h_humidity_avg", "12h_humidity_avg",  "3h_pressure_avg", "3h_wind_speed_avg",
-    
-    # Key volatility/diffs (3)
-    "pm10_volatility_3h", "pm10_diff_3h", "pm10_diff_24h",
+    # Core measurements (5)
+    "pm10", "temperature", "humidity", "pressure", "wind_speed", "precipitation",
 
-    # Weather interactions (2)
-    "dew_point", "stagnation_index",
-    
-    # Debrecen-specific (4)
-    "heating_effect", "dry_spell_days",
-    
-    # Interactions and Trends (1)
-    # "pm10_dew_point"
+    # Temporal & cyclical (4)
+    "hour_sin", "hour_cos", "month_sin", "winter_indicator",
+
+    # Lag features (3)
+    "pm10_lag3", "pm10_lag24", "pm10_lag168",
+
+    # Rolling statistics (7)
+    "3h_pm10_avg", "3h_pm10_std", "24h_pm10_std",
+    "rolling_max_pm10_24h", "rolling_min_pm10_24h",
+    "3h_wind_speed_avg", "24h_wind_speed_avg",
+
+    # Weather and air quality interactions (3)
+    "pm10_diff_3h", "pm10_diff_24h", "pm10_volatility_3h",
+
+    # Precipitation and dew point (3)
+    "is_precipitation", "precipitation_intensity", "dew_point",
+
+    # Debrecen-specific (3)
+    "stagnation_index", "heating_effect", "dry_spell_days"
 ]
 
 # === Feature columns ===
