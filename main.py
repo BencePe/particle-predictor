@@ -94,7 +94,7 @@ def build_model_for_2024(spark):
             val_small,
             assembler_stage,
             scaler_stage,
-            max_evals=120,
+            max_evals=10,
         )
         logger.info(f"Hyperopt returned: {best_params}")
 
@@ -188,7 +188,6 @@ def fetch_current_sensor_data(spark):
         logger.error(f"Error in data tracking: {str(e)}")
         return False
 
-
 def interact_with_db():
     query = input("Enter your query: ")
     logger.info(f"Executing query: {query}")
@@ -213,9 +212,9 @@ def load_latest_and_predict(spark: SparkSession, model_dir=MODEL_DIR):
         logger.info(f"Available models in {model_dir}: {available_models}")
 
         # 1. Load latest GBT model
-        gbt_models = [f for f in available_models if "pm10_gbt_model" in f]
+        gbt_models = [f for f in available_models if "pm10_gbt_best_hyperopt" in f]
         if not gbt_models:
-            logger.error("No GBT model found.")
+            logger.error("No Optimised GBT model found.")
             return
         latest_gbt = sorted(gbt_models, key=extract_timestamp)[-1]
         gbt_path = os.path.join(model_dir, latest_gbt)

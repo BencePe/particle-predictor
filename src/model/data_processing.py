@@ -7,7 +7,7 @@ from pyspark.sql.functions import (
     year, month, hour, dayofweek, dayofyear, datediff,
     when, col, lag, avg, coalesce, lit,
     stddev, sin, cos, count, unix_timestamp, exp,
-    min, abs, pow, sum as spark_sum, dayofmonth
+    min, abs, pow, sum as spark_sum, dayofmonth, max as spark_max, min as spark_min
 )
 from pyspark.sql.window import Window
 from pyspark.sql import functions as F
@@ -31,10 +31,10 @@ def add_temporal_features(df):
         # .withColumn("day_of_week", dayofweek("datetime"))
         # .withColumn("day_of_year", dayofyear("datetime"))
         # .withColumn("is_weekend", when((col("day_of_week") == 1) | (col("day_of_week") == 7), 1).otherwise(0))
-        # .withColumn("is_rush_hour", when(
-        #     ((col("hour") >= 6) & (col("hour") <= 10)) |
-        #     ((col("hour") >= 16) & (col("hour") <= 22)), 1
-        # ).otherwise(0))
+        .withColumn("is_rush_hour", when(
+            ((col("hour") >= 6) & (col("hour") <= 10)) |
+            ((col("hour") >= 16) & (col("hour") <= 22)), 1
+        ).otherwise(0))
         .withColumn("hour_sin", sin(2 * 3.1415926535 * col("hour") / lit(24)))
         .withColumn("hour_cos", cos(2 * 3.1415926535 * col("hour") / lit(24)))
         .withColumn("month_sin", sin(2 * 3.1415926535 * col("month") / lit(12)))
@@ -52,47 +52,50 @@ def add_lag_features(df):
     w = Window.partitionBy("month", "day").orderBy("datetime")
     return (
         df
-        .withColumn("pm10_lag3", lag("pm10", 3).over(w))
+        .withColumn("pm10_lag3", coalesce(lag("pm10", 3).over(w)))
         # .withColumn("pm10_lag6", lag("pm10", 6).over(w))
-        # .withColumn("pm10_lag12",lag("pm10",12).over(w))
-        .withColumn("pm10_lag24",lag("pm10",24).over(w))
+        .withColumn("pm10_lag12",coalesce(lag("pm10",12).over(w)))
+        .withColumn("pm10_lag24",coalesce(lag("pm10",24).over(w)))
         # .withColumn("pm10_lag48",lag("pm10",48).over(w))
         # .withColumn("pm10_lag72",lag("pm10",72).over(w))
-        # .withColumn("pm10_lag168",lag("pm10",168).over(w))
+        .withColumn("pm10_lag168",coalesce(lag("pm10",168).over(w)))
     )
 
 def add_rolling_features(df):
     windows = {
         'lag3':   Window.partitionBy("day").orderBy("datetime").rowsBetween(-3,0),
         # 'lag6':   Window.partitionBy("year","month").orderBy("datetime").rowsBetween(-6,0),
-        'lag12':  Window.partitionBy("day").orderBy("datetime").rowsBetween(-12,0),
+        # 'lag12':  Window.partitionBy("day").orderBy("datetime").rowsBetween(-12,0),
         'lag24':  Window.partitionBy("month", "day").orderBy("datetime").rowsBetween(-24,0),
         # 'lag48':  Window.partitionBy("year","month").orderBy("datetime").rowsBetween(-48,0),
         # 'lag72':  Window.partitionBy("year","month").orderBy("datetime").rowsBetween(-72,0),
-        'lag168': Window.partitionBy("month", "day").orderBy("datetime").rowsBetween(-168,0)
+        # 'lag168': Window.partitionBy("month", "day").orderBy("datetime").rowsBetween(-168,0)
     }
     return (
         df
         .withColumn("3h_pm10_avg",   coalesce(avg("pm10").over(windows['lag3'])))
         # .withColumn("6h_pm10_avg",   avg("pm10").over(windows['lag6']))
         # .withColumn("12h_pm10_avg",  avg("pm10").over(windows['lag12']))
-        .withColumn("24h_pm10_avg",  coalesce(avg("pm10").over(windows['lag24'])))
+        # .withColumn("24h_pm10_avg",  coalesce(avg("pm10").over(windows['lag24'])))
         # .withColumn("48h_pm10_avg",  avg("pm10").over(windows['lag48']))
         # .withColumn("72h_pm10_avg",  avg("pm10").over(windows['lag72']))
         # .withColumn("weekly_pm10_avg",avg("pm10").over(windows['lag168']))
         .withColumn("3h_pm10_std",   coalesce(stddev("pm10").over(windows['lag3'])))
         # .withColumn("6h_pm10_std",   stddev("pm10").over(windows['lag6']))
         # .withColumn("12h_pm10_std",  stddev("pm10").over(windows['lag12']))
-        # .withColumn("24h_pm10_std",  stddev("pm10").over(windows['lag24']))
-        .withColumn("weekly_pm10_std", coalesce(stddev("pm10").over(windows['lag168'])))
-        .withColumn("3h_temp_avg",   avg("temperature").over(windows['lag3']))
+        .withColumn("24h_pm10_std",  coalesce(stddev("pm10").over(windows['lag24'])))
+        # .withColumn("weekly_pm10_std", coalesce(stddev("pm10").over(windows['lag168'])))
+        # .withColumn("3h_temp_avg",   avg("temperature").over(windows['lag3']))
         # .withColumn("12h_temp_avg",  avg("temperature").over(windows['lag12']))
-        .withColumn("3h_humidity_avg",coalesce(avg("humidity").over(windows['lag3'])))
-        .withColumn("12h_humidity_avg",coalesce(avg("humidity").over(windows['lag12'])))
+        # .withColumn("3h_humidity_avg",coalesce(avg("humidity").over(windows['lag3'])))
+        # .withColumn("12h_humidity_avg",coalesce(avg("humidity").over(windows['lag12'])))
         .withColumn("3h_pressure_avg", coalesce(avg("pressure").over(windows['lag3'])))
         # .withColumn("12h_pressure_avg",avg("pressure").over(windows['lag12']))
         .withColumn("3h_wind_speed_avg",coalesce(avg("wind_speed").over(windows['lag3'])))
         # .withColumn("12h_wind_speed_avg",avg("wind_speed").over(windows['lag12']))
+        .withColumn("24h_wind_speed_avg",coalesce(avg("wind_speed").over(windows['lag24'])))
+        .withColumn("rolling_max_pm10_24h", coalesce(spark_max("pm10").over(windows['lag24'])))
+        .withColumn("rolling_min_pm10_24h", coalesce(spark_min("pm10").over(windows['lag24'])))
     )
 
 def add_diff_and_volatility_features(df):
@@ -105,7 +108,7 @@ def add_diff_and_volatility_features(df):
         # .withColumn("pm10_volatility_24h", col("24h_pm10_std") / (col("24h_pm10_avg") + lit(1e-5)))
         .withColumn("pm10_diff_3h",  coalesce(col("pm10") - col("pm10_lag3"), lit(0.0)))
         # .withColumn("pm10_diff_6h",  coalesce(col("pm10") - col("pm10_lag6"), lit(0.0)))
-        # .withColumn("pm10_diff_12h", coalesce(col("pm10") - col("pm10_lag12"),lit(0.0)))
+        .withColumn("pm10_diff_12h", coalesce(col("pm10") - col("pm10_lag12"),lit(0.0)))
         .withColumn("pm10_diff_24h", coalesce(col("pm10") - col("pm10_lag24"),lit(0.0)))
         # .withColumn("pm10_diff_48h", coalesce(col("pm10") - col("pm10_lag48"),lit(0.0)))
         # .withColumn("pm10_acceleration_3h",  coalesce(col("pm10_diff_3h")  - lag("pm10_diff_3h",3).over(w), lit(0.0)))
@@ -127,7 +130,7 @@ def add_precipitation_features(df):
                         when(col("precipitation") < 0.5, 0)
                        .when(col("precipitation") < 5,   1)
                        .otherwise(2))
-            .withColumn("recent_rain",       coalesce(lag("is_precipitation",1).over(w), lit(0)))
+            # .withColumn("recent_rain",       coalesce(lag("is_precipitation",1).over(w), lit(0)))
             # .withColumn("rain_last_6h",     when(spark_sum("is_precipitation").over(w.rowsBetween(-6,0)) > 0, 1).otherwise(0))
             # .withColumn("rain_last_12h",    when(spark_sum("is_precipitation").over(w.rowsBetween(-12,0))> 0, 1).otherwise(0))
             # .withColumn("rain_last_24h",    when(spark_sum("is_precipitation").over(w24)              > 0, 1).otherwise(0))
@@ -146,8 +149,8 @@ def add_precipitation_features(df):
 def add_interaction_and_trend_features(df):
     windows = {
         'lag3':  Window.partitionBy("day").orderBy("datetime").rowsBetween(-3, 0),
-        'lag6':  Window.partitionBy("day").orderBy("datetime").rowsBetween(-6, 0),
-        'lag12': Window.partitionBy("month", "day").orderBy("datetime").rowsBetween(-12,0),
+        # 'lag6':  Window.partitionBy("day").orderBy("datetime").rowsBetween(-6, 0),
+        # 'lag12': Window.partitionBy("month", "day").orderBy("datetime").rowsBetween(-12,0),
         'lag24': Window.partitionBy("month", "day").orderBy("datetime").rowsBetween(-24,0)
     }
     w = Window.partitionBy("month", "day").orderBy("datetime")
@@ -165,7 +168,7 @@ def add_interaction_and_trend_features(df):
         # .withColumn("temp_3h_trend",     coalesce(avg("temperature").over(windows['lag3'])   - col("temperature"), lit(0.0)))
         # .withColumn("temp_6h_trend",     coalesce(avg("temperature").over(windows['lag6'])   - col("temperature"), lit(0.0)))
         # .withColumn("temp_12h_trend",    coalesce(avg("temperature").over(windows['lag12'])  - col("temperature"), lit(0.0)))
-        # .withColumn("temp_24h_trend",    coalesce(avg("temperature").over(windows['lag24'])  - col("temperature"), lit(0.0)))
+        .withColumn("temp_24h_trend",    coalesce(avg("temperature").over(windows['lag24'])  - col("temperature"), lit(0.0)))
         # .withColumn("humidity_3h_trend", coalesce(avg("humidity").over(windows['lag3'])      - col("humidity"), lit(0.0)))
         # .withColumn("humidity_12h_trend",coalesce(avg("humidity").over(windows['lag12'])     - col("humidity"), lit(0.0)))
         # .withColumn("humidity_temp_index", col("humidity") * col("temperature"))
@@ -180,7 +183,7 @@ def add_interaction_and_trend_features(df):
         #                              .when(col("wind_speed")<5,1)
         #                              .when(col("wind_speed")<10,2)
         #                              .otherwise(3))
-        # .withColumn("pollution_load", col("pm10") * col("wind_speed"))
+        .withColumn("pollution_load", coalesce(col("pm10") * col("wind_speed")))
         # .withColumn("pm10_12h_avg_sq", pow(col("12h_pm10_avg"),2))
         # .withColumn("avg12h_times_diff12h", col("12h_pm10_avg") * col("pm10_diff_12h"))
         # .withColumn("temp_humidity_interaction",      col("temperature") * col("humidity")  / lit(100))
@@ -221,47 +224,48 @@ def add_weather_change_features(df):
     )
 
 def add_weather_lag_features(df):
-    w = Window.partitionBy("month", "day").orderBy("datetime")
+    w = Window.partitionBy("month").orderBy("datetime")
     return (
         df
-        .withColumn("temp_lag3", lag("temperature", 3).over(w))
-        .withColumn("temp_lag6", lag("temperature", 6).over(w))
-        .withColumn("temp_lag12", lag("temperature", 12).over(w))
-        .withColumn("temp_lag24", lag("temperature", 24).over(w))
-        .withColumn("humidity_lag3", lag("humidity", 3).over(w))
-        .withColumn("humidity_lag6", lag("humidity", 6).over(w))
-        .withColumn("humidity_lag12", lag("humidity", 12).over(w))
-        .withColumn("humidity_lag24", lag("humidity", 24).over(w))
-        .withColumn("pressure_lag3", lag("pressure", 3).over(w))
-        .withColumn("pressure_lag6", lag("pressure", 6).over(w))
-        .withColumn("pressure_lag12", lag("pressure", 12).over(w))
-        .withColumn("pressure_lag24", lag("pressure", 24).over(w))
-        .withColumn("wind_speed_lag3", lag("wind_speed", 3).over(w))
-        .withColumn("wind_speed_lag6", lag("wind_speed", 6).over(w))
-        .withColumn("wind_speed_lag12", lag("wind_speed", 12).over(w))
-        .withColumn("wind_speed_lag24", lag("wind_speed", 24).over(w))
+        # .withColumn("temp_lag3", lag("temperature", 3).over(w))
+        # .withColumn("temp_lag6", lag("temperature", 6).over(w))
+        # .withColumn("temp_lag12", lag("temperature", 12).over(w))
+        .withColumn("temp_lag24", coalesce(lag("temperature", 24).over(w)))
+        # .withColumn("humidity_lag3", lag("humidity", 3).over(w))
+        # .withColumn("humidity_lag6", lag("humidity", 6).over(w))
+        # .withColumn("humidity_lag12", lag("humidity", 12).over(w))
+        # .withColumn("humidity_lag24", lag("humidity", 24).over(w))
+        # .withColumn("pressure_lag3", lag("pressure", 3).over(w))
+        # .withColumn("pressure_lag6", lag("pressure", 6).over(w))
+        # .withColumn("pressure_lag12", lag("pressure", 12).over(w))
+        # .withColumn("pressure_lag24", lag("pressure", 24).over(w))
+        # .withColumn("wind_speed_lag3", lag("wind_speed", 3).over(w))
+        # .withColumn("wind_speed_lag6", lag("wind_speed", 6).over(w))
+        # .withColumn("wind_speed_lag12", lag("wind_speed", 12).over(w))
+        # .withColumn("wind_speed_lag24", lag("wind_speed", 24).over(w))
     )
 
 def add_weather_rate_of_change(df):
     w = Window.partitionBy("month", "day").orderBy("datetime")
     return (
         df
-        .withColumn("temp_diff_3h", coalesce(col("temperature") - col("temp_lag3"), lit(0.0)))
-        .withColumn("temp_diff_6h", coalesce(col("temperature") - col("temp_lag6"), lit(0.0)))
-        .withColumn("temp_diff_12h", coalesce(col("temperature") - col("temp_lag12"), lit(0.0)))
+        # .withColumn("temp_diff_3h", coalesce(col("temperature") - col("temp_lag3"), lit(0.0)))
+        # .withColumn("temp_diff_6h", coalesce(col("temperature") - col("temp_lag6"), lit(0.0)))
+        # .withColumn("temp_diff_12h", coalesce(col("temperature") - col("temp_lag12"), lit(0.0)))
         .withColumn("temp_diff_24h", coalesce(col("temperature") - col("temp_lag24"), lit(0.0)))
-        .withColumn("humidity_diff_3h", coalesce(col("humidity") - col("humidity_lag3"), lit(0.0)))
-        .withColumn("humidity_diff_6h", coalesce(col("humidity") - col("humidity_lag6"), lit(0.0)))
-        .withColumn("humidity_diff_12h", coalesce(col("humidity") - col("humidity_lag12"), lit(0.0)))
-        .withColumn("pressure_diff_3h", coalesce(col("pressure") - col("pressure_lag3"), lit(0.0)))
-        .withColumn("pressure_diff_6h", coalesce(col("pressure") - col("pressure_lag6"), lit(0.0)))
-        .withColumn("pressure_diff_12h", coalesce(col("pressure") - col("pressure_lag12"), lit(0.0)))
-        .withColumn("wind_speed_diff_3h", coalesce(col("wind_speed") - col("wind_speed_lag3"), lit(0.0)))
-        .withColumn("wind_speed_diff_6h", coalesce(col("wind_speed") - col("wind_speed_lag6"), lit(0.0)))
-        .withColumn("wind_speed_diff_12h", coalesce(col("wind_speed") - col("wind_speed_lag12"), lit(0.0)))
-        .withColumn("temp_rate_3h", col("temp_diff_3h") / (coalesce(col("temp_lag3"), lit(1.0)) + lit(1e-5)))
-        .withColumn("pressure_rate_3h", col("pressure_diff_3h") / (coalesce(col("pressure_lag3"), lit(1000.0)) + lit(1e-5)))
-        .withColumn("humidity_rate_3h", col("humidity_diff_3h") / (coalesce(col("humidity_lag3"), lit(50.0)) + lit(1e-5)))
+        # .withColumn("humidity_diff_3h", coalesce(col("humidity") - col("humidity_lag3"), lit(0.0)))
+        # .withColumn("humidity_diff_6h", coalesce(col("humidity") - col("humidity_lag6"), lit(0.0)))
+        # .withColumn("humidity_diff_12h", coalesce(col("humidity") - col("humidity_lag12"), lit(0.0)))
+        # .withColumn("humidity_diff_24h", coalesce(col("humidity") - col("humidity_lag24"), lit(0.0)))
+        # .withColumn("pressure_diff_3h", coalesce(col("pressure") - col("pressure_lag3"), lit(0.0)))
+        # .withColumn("pressure_diff_6h", coalesce(col("pressure") - col("pressure_lag6"), lit(0.0)))
+        # .withColumn("pressure_diff_12h", coalesce(col("pressure") - col("pressure_lag12"), lit(0.0)))
+        # .withColumn("wind_speed_diff_3h", coalesce(col("wind_speed") - col("wind_speed_lag3"), lit(0.0)))
+        # .withColumn("wind_speed_diff_6h", coalesce(col("wind_speed") - col("wind_speed_lag6"), lit(0.0)))
+        # .withColumn("wind_speed_diff_12h", coalesce(col("wind_speed") - col("wind_speed_lag12"), lit(0.0)))
+        # .withColumn("temp_rate_3h", col("temp_diff_3h") / (coalesce(col("temp_lag3"), lit(1.0)) + lit(1e-5)))
+        # .withColumn("pressure_rate_3h", col("pressure_diff_3h") / (coalesce(col("pressure_lag3"), lit(1000.0)) + lit(1e-5)))
+        # .withColumn("humidity_rate_3h", col("humidity_diff_3h") / (coalesce(col("humidity_lag3"), lit(50.0)) + lit(1e-5)))
     )
 
 def add_weather_regime_indicators(df):
@@ -359,13 +363,13 @@ def add_urban_features(df):
         # df = add_debrecen_specific_features(df)
         
         df = add_temporal_features(df)
+        df = add_weather_lag_features(df)
         df = add_lag_features(df)
         df = add_rolling_features(df)
         df = add_diff_and_volatility_features(df)
         df = add_precipitation_features(df)
         df = add_interaction_and_trend_features(df)
         df = add_debrecen_specific_features(df)
-        
         
         feature_cols = [c for c in df.columns if c in FEATURE_COLUMNS]
         df = df.na.fill(0.0, subset=feature_cols)

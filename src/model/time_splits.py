@@ -1,17 +1,17 @@
 from datetime import datetime, date, timedelta
+from pyspark.sql import functions as F
 
 def hybrid_time_validation(df, datetime_col="datetime", 
-                          initial_train_years=3, 
+                          initial_train_years=1, 
                           test_window_months=3,
                           gap_weeks=2):
     """
     Creates sequential splits with:
-    - Initial 3-year training period
+    - Initial 1-year training period
     - 3-month test windows
     - 2-week gap between train/test
     """
-    from pyspark.sql import functions as F
-    from pyspark.sql.window import Window
+
 
     splits = []
 

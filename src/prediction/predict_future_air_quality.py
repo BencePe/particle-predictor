@@ -121,29 +121,25 @@ def recursive_pm10_forecast(
     Predict PM10 recursively using historical and future weather data,
     properly filling missing history before switching to true forecasting.
     """
-    import pandas as pd
-    import numpy as np
-    from pyspark.sql.functions import lit
 
     hist_pd = hist_df.toPandas().sort_values("datetime").reset_index(drop=True)
     future_pd = future_weather_df.toPandas().sort_values("datetime").reset_index(drop=True)
 
     if "precipitation" not in hist_pd.columns:
         hist_pd["precipitation"] = 0.0
-    if "precipitation" not in future_pd.columns:
-        future_pd["precipitation"] = 0.0
 
     # Determine split point: last datetime in historical
     last_hist_time = hist_pd["datetime"].max()
 
     # Separate future overlap (patch) vs true future forecast
     future_patch = future_pd[future_pd["datetime"] <= last_hist_time]
-    future_forecast = future_pd[future_pd["datetime"] > last_hist_time]
+    future_forecast = future_pd[future_pd["datetime"] >= last_hist_time]
 
     # Build buffers
     pm10_buffer = hist_pd["pm10"].iloc[-96:].tolist()
     pressure_buffer = hist_pd["pressure"].iloc[-96:].tolist()
     wind_buffer = hist_pd["wind_speed"].iloc[-96:].tolist()
+    temp_buffer = hist_pd["temperature"].iloc[-96:].tolist()
 
     # Historical bounds
     hist_min = max(0, hist_pd["pm10"].min() * 0.5)
@@ -170,13 +166,13 @@ def recursive_pm10_forecast(
         pred_row = model.transform(single_feats).first()
         pred = float(pred_row["prediction"])
 
-        if residual_model:
-            enriched = single_feats.withColumn("base_prediction", lit(pred))
-            if base_time:
-                horizon = (dt - base_time).total_seconds() / 3600.0
-                enriched = enriched.withColumn("forecast_horizon", lit(horizon))
-            res_pred = residual_model.transform(enriched).first()["residual_prediction"]
-            pred += float(res_pred)
+        # if residual_model:
+        #     enriched = single_feats.withColumn("base_prediction", lit(pred))
+        #     if base_time:
+        #         horizon = (dt - base_time).total_seconds() / 3600.0
+        #         enriched = enriched.withColumn("forecast_horizon", lit(horizon))
+        #     res_pred = residual_model.transform(enriched).first()["residual_prediction"]
+        #     pred += float(res_pred)
 
         pred = max(hist_min, min(pred, hist_max))  # Stabilization
         return pred
@@ -201,41 +197,31 @@ def recursive_pm10_forecast(
             "pressure": pres,
             "wind_speed": wind,
             "precipitation": precip,
-            "year": dt.year,
-            "month": dt.month,
-            "day": dt.day,
-            "hour": dt.hour,
-            "is_weekend": int(dt.weekday() >= 5),
             "hour_sin": np.sin(2 * np.pi * dt.hour / 24.0),
             "hour_cos": np.cos(2 * np.pi * dt.hour / 24.0),
             "month_sin": np.sin(2 * np.pi * dt.month / 12.0),
-            "summer_indicator": int(6 <= dt.month <= 8),
             "winter_indicator": int(dt.month == 12 or dt.month <= 2),
             "pm10_lag3": buffer_lag(pm10_buffer, 3),
             "pm10_lag24": buffer_lag(pm10_buffer, 24),
+            "pm10_lag168": buffer_lag(pm10_buffer, 168),
             "3h_pm10_avg": buffer_roll(pm10_buffer, 3, np.mean),
-            "24h_pm10_avg": buffer_roll(pm10_buffer, 24, np.mean),
             "3h_pm10_std": buffer_roll(pm10_buffer, 3, np.std),
-            "weekly_pm10_std": buffer_roll(pm10_buffer, 168, np.std),
-            "3h_temp_avg": buffer_roll(pm10_buffer, 3, np.mean),
-            "3h_humidity_avg": buffer_roll(pm10_buffer, 3, np.mean),
-            "12h_humidity_avg": buffer_roll(pm10_buffer, 12, np.mean),
-            "3h_pressure_avg": buffer_roll(pressure_buffer, 3, np.mean),
+            "24h_pm10_std": buffer_roll(pm10_buffer, 24, np.std),
+            "rolling_max_pm10_24h": buffer_roll(pm10_buffer, 24, np.max),
+            "rolling_min_pm10_24h": buffer_roll(pm10_buffer, 24, np.min),
             "3h_wind_speed_avg": buffer_roll(wind_buffer, 3, np.mean),
-            "pm10_volatility_3h": buffer_roll(pm10_buffer, 3, np.std) / (buffer_roll(pm10_buffer, 3, np.mean) + 1e-5),
+            "24h_wind_speed_avg": buffer_roll(wind_buffer, 24, np.mean),
             "pm10_diff_3h": last_pm10 - buffer_lag(pm10_buffer, 3) if not np.isnan(buffer_lag(pm10_buffer, 3)) else 0.0,
             "pm10_diff_24h": last_pm10 - buffer_lag(pm10_buffer, 24) if not np.isnan(buffer_lag(pm10_buffer, 24)) else 0.0,
+            "pm10_volatility_3h": buffer_roll(pm10_buffer, 3, np.std) / (buffer_roll(pm10_buffer, 3, np.mean) + 1e-5),
             "is_precipitation": int(precip > 0.1),
             "precipitation_intensity": 0 if precip < 0.5 else (1 if precip < 5 else 2),
-            "recent_rain": int(hist_pd["precipitation"].iloc[-1] > 0.1 if len(hist_pd) > 0 else 0),
             "dew_point": temp - (100 - hum) / 5,
             "stagnation_index": int(wind < 2.5 and abs(pres - prev_pressure) < 1.0 and hum > 70),
             "heating_effect": int((dt.month == 12 or dt.month <= 2) and temp < 2 and hum > 80),
             "dry_spell_days": int(dry_spell_days),
-            # "pm10_dew_point": abs(int(pm10_target) * (temp - (100 - hum) / 5)) 
         }
         return feat
-
     # --- Phase 1: Fill missing (patched) history ---
     for i in range(len(future_patch)):
         row = future_patch.iloc[i]
@@ -248,9 +234,10 @@ def recursive_pm10_forecast(
         pm10_buffer.append(pred)
         pressure_buffer.append(row["pressure"])
         wind_buffer.append(row["wind_speed"])
-        pm10_buffer = pm10_buffer[-192:]
-        pressure_buffer = pressure_buffer[-192:]
-        wind_buffer = wind_buffer[-192:]
+        pm10_buffer = pm10_buffer[-96:]
+        pressure_buffer = pressure_buffer[-96:]
+        wind_buffer = wind_buffer[-96:]
+        temp_buffer = temp_buffer[-96:]
 
         # Update hist_pd for dry_spell/rain checks
         hist_pd = pd.concat([hist_pd, pd.DataFrame({"datetime": [dt], "precipitation": [row["precipitation"]]})], ignore_index=True).iloc[-168:]
@@ -267,34 +254,11 @@ def recursive_pm10_forecast(
         pm10_buffer.append(pred)
         pressure_buffer.append(row["pressure"])
         wind_buffer.append(row["wind_speed"])
-        pm10_buffer = pm10_buffer[-192:]
-        pressure_buffer = pressure_buffer[-192:]
-        wind_buffer = wind_buffer[-192:]
+        pm10_buffer = pm10_buffer[-96:]
+        pressure_buffer = pressure_buffer[-96:]
+        wind_buffer = wind_buffer[-96:]
 
         hist_pd = pd.concat([hist_pd, pd.DataFrame({"datetime": [dt], "precipitation": [row["precipitation"]]})], ignore_index=True).iloc[-168:]
 
     # --- Return full forecast DataFrame ---
     return spark.createDataFrame(pd.DataFrame(forecasts))
-
-
-# def updated_recursive_forecast_core_logic(feat, pred, i, hist_pd):
-#     """
-#     Enhances forecast stability:
-#     - Decay toward historical mean as horizon increases
-#     - Adds forecast_horizon feature (optional use)
-#     - Clips predictions
-#     - Blends with hourly climatology
-#     """
-#     decay_days = i / 24
-#     decay_alpha = 0.90 ** decay_days
-#     hist_mean = hist_pd["pm10"].mean()
-#     pred = decay_alpha * pred + (1 - decay_alpha) * hist_mean
-
-#     hourly_avg = hist_pd.groupby(hist_pd["datetime"].dt.hour)["pm10"].mean()
-#     hourly_blend = hourly_avg.get(feat["hour"], hist_mean)
-#     pred = 0.95 * pred + 0.05 * hourly_blend
-
-#     feat["forecast_horizon"] = i  # Optional feature if added to model later
-#     pred = min(max(pred, 0), 60)  # Prevent spikes
-
-#     return pred, feat
