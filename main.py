@@ -94,9 +94,10 @@ def build_model_for_2024(spark):
             val_small,
             assembler_stage,
             scaler_stage,
-            max_evals=120,
+            max_evals=60,
         )
         logger.info(f"Hyperopt returned: {best_params}")
+        logger.info(f"Hyperopt returned: {best_metrics}")
 
         # 9) Build final GBT regressor with best params
         gbt = GBTRegressor(
@@ -115,7 +116,7 @@ def build_model_for_2024(spark):
         model = train_model(full_pipeline, train_df)
 
         # 11) Feature importance
-        # analyze_feature_importance(model, feature_cols)
+        analyze_feature_importance(model, feature_cols)
 
         # 13) Evaluate tuned model
         tuned_metrics = evaluate_model(model, test_df)
@@ -207,13 +208,13 @@ def extract_timestamp(name: str) -> datetime:
         return datetime.min
 
 def load_latest_and_predict(spark: SparkSession, model_dir=MODEL_DIR):
-    logger.info("Loading latest GBT + Residual models for prediction...")
+    logger.info("Loading best GBT + Residual models for prediction...")
     try:
         available_models = os.listdir(model_dir)
         logger.info(f"Available models in {model_dir}: {available_models}")
 
         # 1. Load latest GBT model
-        gbt_models = [f for f in available_models if "pm10_gbt_model" in f]
+        gbt_models = [f for f in available_models if "pm10_gbt_best_hyperopt" in f]
         if not gbt_models:
             logger.error("No GBT model found.")
             return

@@ -381,25 +381,22 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
         imbalance_penalty = 0.0
         if max_importance > 0.15:  # Adjusted threshold (was 0.10)
             # Linear penalty with gentler scaling
-            imbalance_penalty = (max_importance - 0.15) * 15.0  # Reduced from 33.0 * (1.0 + max_importance)
+            imbalance_penalty = (max_importance - 0.15) * 20.0  # Reduced from 33.0 * (1.0 + max_importance)
             
         # 2. Progressive penalty for 3h_pm10_avg
         pm10_avg_penalty = 0.0
         if pm10_avg_importance > 0:
             # Base penalty for any usage
-            pm10_avg_penalty = 0.8
+            pm10_avg_penalty = 0.0
             
             # Progressive penalty based on importance level
-            if pm10_avg_importance > 0.05:
-                pm10_avg_penalty += (pm10_avg_importance - 0.05) * 10.0
-                
             if pm10_avg_importance > 0.15:
-                pm10_avg_penalty += (pm10_avg_importance - 0.15) * 20.0
+                pm10_avg_penalty += (pm10_avg_importance - 0.05) * 10.0
             
         # 3. Penalty for having a few dominant features - reduced weight
         concentration_penalty = 0.0
-        if top_3_sum > 0.65:  # Relaxed threshold (was 0.6)
-            concentration_penalty = (top_3_sum - 0.65) * 6.0  # Reduced from 10.0
+        if top_3_sum > 0.6:
+            concentration_penalty = (top_3_sum - 0.6) * 6.0  # Reduced from 10.0
             
         # 4. Standard deviation penalty - reward more balanced distributions
         distribution_penalty = std_importance * 12.0  # Reduced from 25.0
@@ -437,7 +434,7 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
         adjusted_loss = base_loss
         if pm10_avg_importance > 0:
             # Add a modest fixed penalty to prefer non-3h_pm10_avg models
-            adjusted_loss += 1.5 * pm10_avg_importance
+            adjusted_loss += 1 * pm10_avg_importance
         
         # Update best model if better than current best
         if adjusted_loss < best_loss:
@@ -459,8 +456,7 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
                     "complexity": complexity_penalty
                 }
             }
-            uses_pm10_avg = "uses 3h_pm10_avg" if pm10_avg_importance > 0 else "without 3h_pm10_avg"
-            logger.info(f"New best model found! Adjusted Loss: {adjusted_loss:.4f}, RMSE: {val_rmse:.4f} ({uses_pm10_avg})")
+            logger.info(f"New best model found! Adjusted Loss: {adjusted_loss:.4f}, RMSE: {val_rmse:.4f}")
             
             # Special logging for models with exceptional RMSE
             if val_rmse < 2.3:
@@ -485,14 +481,13 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
     # Modified search space to focus on promising areas
     space = {
         "maxDepth": hp.choice("maxDepth", [2, 3]),  # Focus on smaller trees
-        "maxIter": hp.choice("maxIter", [160, 170, 180, 190]),
-        "stepSize": hp.uniform("stepSize", 0.09, 0.105),  # Narrower range
-        "maxBins": hp.choice("maxBins", [110, 120, 130]),
-        "minInstancesPerNode": hp.choice("minInstancesPerNode", [10, 12, 14]),
-        "subsamplingRate": hp.uniform("subsamplingRate", 0.62, 0.70),  # Narrower range
+        "maxIter": hp.choice("maxIter", [180, 190, 200]),
+        "stepSize": hp.uniform("stepSize", 0.9, 1.0),  # Narrower range
+        "maxBins": hp.choice("maxBins", [140, 150, 160]),
+        "minInstancesPerNode": hp.choice("minInstancesPerNode", [13, 14, 15]),
+        "subsamplingRate": hp.uniform("subsamplingRate", 0.6, 0.7),  # Narrower range
         "featureSubsetStrategy": hp.choice("featureSubsetStrategy", ["log2", "onethird"])
     }
-    
     # Run optimization
     trials = Trials()
     best = fmin(
@@ -551,17 +546,38 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
     
     # Save the best model if one was found
     if best_model is not None:
-        logger.info(f"Saving best model with metrics: {best_metrics}")
-        model_path = save_model(best_model, model_name="pm10_gbt_best_hyperopt")
-        logger.info(f"Best model saved to: {model_path}")
+        logger.info(f"Retraining best model on full train set with best hyperparameters...")
+
+        # ⚡ Rebuild best GBT model for full data training
+        best_gbt = GBTRegressor(
+            labelCol="pm10",
+            featuresCol="features",
+            maxDepth=int(best_params["maxDepth"]),
+            maxIter=int(best_params["maxIter"]),
+            stepSize=float(best_params["stepSize"]),
+            maxBins=int(best_params["maxBins"]),
+            minInstancesPerNode=int(best_params["minInstancesPerNode"]),
+            subsamplingRate=float(best_params["subsamplingRate"]),
+            featureSubsetStrategy=best_params["featureSubsetStrategy"],
+            seed=MODEL_PARAMS.get("seed", 42)
+        )
+
+        full_pipeline = Pipeline(stages=[assembler_stage, scaler_stage, best_gbt])
+
+        # Retrain fully
+        full_model = full_pipeline.fit(train_df)
+
+        # Save it
+        model_path = save_model(full_model, model_name="pm10_gbt_best_hyperopt")
+        logger.info(f"✅ Full retrained best model saved to: {model_path}")
         
-        # Log if best model uses 3h_pm10_avg
-        if best_metrics.get("pm10_avg_importance", 0) > 0:
-            logger.info(f"Note: Best model uses 3h_pm10_avg with importance: {best_metrics['pm10_avg_importance']:.4f}")
+        # Return this full model now
+        return best_params, trials, full_model, best_metrics
+
     else:
         logger.warning("No suitable model found")
-    
-    return best_params, trials, best_model, best_metrics
+        return best_params, trials, None, None
+
 
 def plot_model_comparison(model, res_model, test_df, corrected_df, base_metrics, resid_metrics, feature_cols=None):
     """
