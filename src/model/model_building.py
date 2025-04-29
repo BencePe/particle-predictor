@@ -364,10 +364,12 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
         pm10_avg_importance = 0
         try:
             # Find index of 3h_pm10_avg in feature columns
-            if "3h_pm10_avg" in feature_cols:
+            if "3h_pm10_avg" and "rolling_max_pm10_24h" in feature_cols:
                 idx = feature_cols.index("3h_pm10_avg")
+                idy = feature_cols.index("rolling_max_pm10_24h")
                 if idx < len(importances):
                     pm10_avg_importance = importances[idx]
+                    rolling_max_pm10_24h_importance = importances[idy]
         except:
             pass  # If there's an error, we'll use max importance
             
@@ -379,11 +381,11 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
         
         # 1. Imbalance penalty with progressive scaling - reduced weight
         imbalance_penalty = 0.0
-        if max_importance > 0.15:  # Adjusted threshold (was 0.10)
+        if max_importance > 0.13:  # Adjusted threshold (was 0.10)
             # Linear penalty with gentler scaling
             imbalance_penalty = (max_importance - 0.15) * 20.0  # Reduced from 33.0 * (1.0 + max_importance)
             
-        # 2. Progressive penalty for 3h_pm10_avg
+        # 2.1 Progressive penalty for 3h_pm10_avg
         pm10_avg_penalty = 0.0
         if pm10_avg_importance > 0:
             # Base penalty for any usage
@@ -392,14 +394,24 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
             # Progressive penalty based on importance level
             if pm10_avg_importance > 0.15:
                 pm10_avg_penalty += (pm10_avg_importance - 0.05) * 10.0
+        
+        # 2.2 Progressive penalty for 3h_pm10_avg
+        rolling_max_pm10_24h_penalty = 0.0
+        if rolling_max_pm10_24h_importance > 0:
+            # Base penalty for any usage
+            rolling_max_pm10_24h_penalty = 0.0
             
+            # Progressive penalty based on importance level
+            if rolling_max_pm10_24h_importance > 0.15:
+                rolling_max_pm10_24h_penalty += (rolling_max_pm10_24h_importance - 0.05) * 10.0
+        
         # 3. Penalty for having a few dominant features - reduced weight
         concentration_penalty = 0.0
         if top_3_sum > 0.6:
-            concentration_penalty = (top_3_sum - 0.6) * 6.0  # Reduced from 10.0
+            concentration_penalty = (top_3_sum - 0.6) * 7.0  # Reduced from 10.0
             
         # 4. Standard deviation penalty - reward more balanced distributions
-        distribution_penalty = std_importance * 12.0  # Reduced from 25.0
+        distribution_penalty = std_importance * 14.0  # Reduced from 25.0
 
         # 5. Complexity penalty - adjusted weights
         complexity_penalty = (
@@ -409,7 +421,7 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
         )
 
         # Total penalty
-        total_penalty = imbalance_penalty + complexity_penalty + \
+        total_penalty = imbalance_penalty + complexity_penalty + rolling_max_pm10_24h_penalty +\
                         pm10_avg_penalty + concentration_penalty + distribution_penalty
                         
         # Base loss
@@ -480,12 +492,12 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
     
     # Modified search space to focus on promising areas
     space = {
-        "maxDepth": hp.choice("maxDepth", [2, 3]),  # Focus on smaller trees
-        "maxIter": hp.choice("maxIter", [180, 190, 200]),
-        "stepSize": hp.uniform("stepSize", 0.9, 1.0),  # Narrower range
-        "maxBins": hp.choice("maxBins", [140, 150, 160]),
-        "minInstancesPerNode": hp.choice("minInstancesPerNode", [13, 14, 15]),
-        "subsamplingRate": hp.uniform("subsamplingRate", 0.6, 0.7),  # Narrower range
+        "maxDepth": hp.choice("maxDepth", [4,5,6]),  # Focus on smaller trees
+        "maxIter": hp.choice("maxIter", [150, 170, 190]),
+        "stepSize": hp.uniform("stepSize", 0.25, 0.5),  # Narrower range
+        "maxBins": hp.choice("maxBins", [100, 120, 140]),
+        "minInstancesPerNode": hp.choice("minInstancesPerNode", [5,8,10]),
+        "subsamplingRate": hp.uniform("subsamplingRate", 0.65, 0.75),  # Narrower range
         "featureSubsetStrategy": hp.choice("featureSubsetStrategy", ["log2", "onethird"])
     }
     # Run optimization
@@ -500,10 +512,10 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
     
     # Map best params back to their original types/values
     featureSubsetStrategy_options = ["log2", "onethird"]
-    maxDepth_options = [2, 3]
-    maxIter_options = [160, 170, 180, 190]
-    maxBins_options = [110, 120, 130]
-    minInstancesPerNode_options = [10, 12, 14]
+    maxDepth_options = [4,5,6]
+    maxIter_options = [150, 170, 190]
+    maxBins_options = [100, 120, 140]
+    minInstancesPerNode_options = [5,8,10]
     
     best_params = {
         "maxDepth": maxDepth_options[best["maxDepth"]],
@@ -569,7 +581,7 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
 
         # Save it
         model_path = save_model(full_model, model_name="pm10_gbt_best_hyperopt")
-        logger.info(f"✅ Full retrained best model saved to: {model_path}")
+        logger.info(f"Full retrained best model saved to: {model_path}")
         
         # Return this full model now
         return best_params, trials, full_model, best_metrics

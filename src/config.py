@@ -82,28 +82,34 @@ DB_CONFIG = {
 }
 
 FEATURE_COLUMNS = [
-    # Core measurements (5)
+    # Core measurements
     "pm10", "temperature", "humidity", "pressure", "wind_speed", "precipitation",
 
-    # Temporal & cyclical (4)
-    "hour_sin", "hour_cos", "month_sin", "winter_indicator",
+    # Temporal & cyclical
+    "hour_sin", "hour_cos", "week_sin", "week_cos", "month_sin", "month_cos",
+    "winter_indicator", "spring_indicator", "summer_indicator", "fall_indicator",
 
-    # Lag features (3)
-    "pm10_lag3", "pm10_lag24", "pm10_lag168",
+    # Lag features
+    "pm10_lag3", "pm10_lag12", "pm10_lag24", "pm10_lag168",
 
-    # Rolling statistics (7)
-    "3h_pm10_avg", "3h_pm10_std", "24h_pm10_std",
-    "rolling_max_pm10_24h", "rolling_min_pm10_24h",
+    # Rolling statistics
+    "3h_pm10_avg",  "24h_pm10_avg",
+    "3h_pm10_std",  "24h_pm10_std",
+    "3h_pressure_avg",
     "3h_wind_speed_avg", "24h_wind_speed_avg",
+    "rolling_max_pm10_24h", "rolling_min_pm10_24h",
 
-    # Weather and air quality interactions (3)
-    "pm10_diff_3h", "pm10_diff_24h", "pm10_volatility_3h",
+    # Weather and air quality interactions
+    "pm10_volatility_3h", "pm10_diff_3h", "pm10_diff_12h", "pm10_diff_24h", 
 
-    # Precipitation and dew point (3)
+    # Precipitation and dew point
     "is_precipitation", "precipitation_intensity", "dew_point",
 
-    # Debrecen-specific (3)
+    # Debrecen-specific
+    "temp_24h_trend", "pollution_load",
+    "temp_lag24", "temp_diff_24h",
     "stagnation_index", "heating_effect", "dry_spell_days"
+    
 ]
 
 # === Feature columns ===

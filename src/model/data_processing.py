@@ -28,7 +28,7 @@ def add_temporal_features(df):
         #     (dayofweek("datetime") == 7),    # Saturday
         #     1
         # ).otherwise(0))
-        # .withColumn("day_of_week", dayofweek("datetime"))
+        .withColumn("day_of_week", dayofweek("datetime"))
         # .withColumn("day_of_year", dayofyear("datetime"))
         # .withColumn("is_weekend", when((col("day_of_week") == 1) | (col("day_of_week") == 7), 1).otherwise(0))
         .withColumn("is_rush_hour", when(
@@ -37,14 +37,16 @@ def add_temporal_features(df):
         ).otherwise(0))
         .withColumn("hour_sin", sin(2 * 3.1415926535 * col("hour") / lit(24)))
         .withColumn("hour_cos", cos(2 * 3.1415926535 * col("hour") / lit(24)))
+        .withColumn("week_sin", sin(2 * 3.1415926535 * col("day_of_week") / lit(7)))
+        .withColumn("week_cos", cos(2 * 3.1415926535 * col("day_of_week") / lit(7)))
         .withColumn("month_sin", sin(2 * 3.1415926535 * col("month") / lit(12)))
-        # .withColumn("month_cos", cos(2 * 3.1415926535 * col("month") / lit(12)))
+        .withColumn("month_cos", cos(2 * 3.1415926535 * col("month") / lit(12)))
         # .withColumn("day_of_year_sin", sin(2 * 3.1415926535 * col("day_of_year") / lit(365)))
         # .withColumn("day_of_year_cos", cos(2 * 3.1415926535 * col("day_of_year") / lit(365)))
         # .withColumn("hour_weekend", col("hour") * col("is_weekend"))
-        # .withColumn("spring_indicator", when((col("month") >= 3) & (col("month") <= 5), 1).otherwise(0))
+        .withColumn("spring_indicator", when((col("month") >= 3) & (col("month") <= 5), 1).otherwise(0))
         .withColumn("summer_indicator", when((col("month") >= 6) & (col("month") <= 8), 1).otherwise(0))
-        # .withColumn("fall_indicator",   when((col("month") >= 9) & (col("month") <= 11),1).otherwise(0))
+        .withColumn("fall_indicator",   when((col("month") >= 9) & (col("month") <= 11),1).otherwise(0))
         .withColumn("winter_indicator", when((col("month") == 12)|(col("month") <= 2), 1).otherwise(0))
     )
 
@@ -76,7 +78,7 @@ def add_rolling_features(df):
         .withColumn("3h_pm10_avg",   coalesce(avg("pm10").over(windows['lag3'])))
         # .withColumn("6h_pm10_avg",   avg("pm10").over(windows['lag6']))
         # .withColumn("12h_pm10_avg",  avg("pm10").over(windows['lag12']))
-        # .withColumn("24h_pm10_avg",  coalesce(avg("pm10").over(windows['lag24'])))
+        .withColumn("24h_pm10_avg",  coalesce(avg("pm10").over(windows['lag24'])))
         # .withColumn("48h_pm10_avg",  avg("pm10").over(windows['lag48']))
         # .withColumn("72h_pm10_avg",  avg("pm10").over(windows['lag72']))
         # .withColumn("weekly_pm10_avg",avg("pm10").over(windows['lag168']))
@@ -190,22 +192,7 @@ def add_interaction_and_trend_features(df):
         # .withColumn("temp_pressure_interaction",      col("temperature") * col("pressure")  / lit(1000))
         # .withColumn("wind_temp_cross", when((col("temperature")>15)&(col("wind_speed")>5),1).otherwise(0))
     )
-
-def add_seasonal_indicators(df):
-    return df.withColumn(
-        "spring_indicator",
-        when((month("datetime") >= 3) & (month("datetime") <= 5), 1).otherwise(0)
-    ).withColumn(
-        "summer_indicator",
-        when((month("datetime") >= 6) & (month("datetime") <= 8), 1).otherwise(0)
-    ).withColumn(
-        "fall_indicator",
-        when((month("datetime") >= 9) & (month("datetime") <= 11), 1).otherwise(0)
-    ).withColumn(
-        "winter_indicator",
-        when((month("datetime") == 12) | (month("datetime") <= 2), 1).otherwise(0)
-    )
-
+    
 def add_weather_change_features(df):
     w = Window.partitionBy("day").orderBy("datetime")
     return (
@@ -364,6 +351,7 @@ def add_urban_features(df):
         
         df = add_temporal_features(df)
         df = add_weather_lag_features(df)
+        df = add_weather_rate_of_change(df)
         df = add_lag_features(df)
         df = add_rolling_features(df)
         df = add_diff_and_volatility_features(df)
@@ -373,7 +361,7 @@ def add_urban_features(df):
         
         feature_cols = [c for c in df.columns if c in FEATURE_COLUMNS]
         df = df.na.fill(0.0, subset=feature_cols)
-        df = df.drop("year", "month", "day", "hour") # , "day_of_week", "day_of_year"
+        df = df.drop("year", "month", "day", "hour", "day_of_week") # , "day_of_week", "day_of_year"
         logger.info("Enhanced urban features added.")
         return df
 
