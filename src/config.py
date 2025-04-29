@@ -32,10 +32,21 @@ DEBRECEN_LON = 21.6244
 DEBRECEN_ELEVATION = 122
 
 # === API keys ===
-THINGSPEAK_CHANNEL_ID = "2312381"
-THINGSPEAK_READ_API_KEY = "4LBD6CEVGGNDKQE2"
+
+THINGSPEAK_KEYS = {
+    "board_inside": {
+        "channel_id": "2312381",
+        "read_key": "4LBD6CEVGGNDKQE2",
+        "field_names": ["pm10"]
+    },
+    "board_outside": {
+        "channel_id": "2934032",
+        "read_key": "NW6NJ5E711EPC8EY",
+        "field_names": ["pm10"]
+    }
+}
+
 OW_API_KEY = os.getenv("OW_API_KEY", "83d50870977893b61ac48149455cf65a")
-TT_API_KEY = os.getenv("TT_API_KEY", "")
 
 # === API request limit ===
 API_REQUEST_LIMIT = 3000
@@ -67,7 +78,7 @@ DB_CONFIG = {
     "database": os.getenv("DB_NAME", "sensors"),
     "user": os.getenv("DB_USER", "username"),
     "password": os.getenv("DB_PASSWORD", "password"),
-    "table_name": "historical_2024"
+    "table_name": ["historical", "board_inside", "board_outside", "hourly_2025_inside", "hourly_2025_outside"]
 }
 
 FEATURE_COLUMNS = [

@@ -79,7 +79,7 @@ def db_data_transaction(spark, operation, table_name, data=None, query=None):
                 return False
                 
             # Validate that all required columns are present
-            if table_name in ["historical_2024"]:
+            if table_name in ["historical"]:
                 required_columns = ["datetime", "pm10", "temperature", "humidity", 
                                    "pressure", "wind_speed", "wind_dir", "elevation", "is_urban", "is_future"]
                 missing_columns = [col for col in required_columns if col not in data.columns]
