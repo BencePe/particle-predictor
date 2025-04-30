@@ -9,22 +9,15 @@ import sys
 import logging
 import time
 from xml.sax.handler import all_features
-
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import lit
 from pyspark.sql import functions as F
-
-
 from pyspark.ml import Pipeline
 from pyspark.ml.regression import GBTRegressor
-
 from src.prediction.predict_future_air_quality import predict_future_air_quality
 from src.db.db_operations import check_db_ready, execute_db_query
 from src.utils import setup_logging, create_spark_session, cleanup_resources
 from src.fetching.data_fetching import assemble_and_pass, fetch_current_data
-
-# ──────────────────────────────────────────────────────────────────────────────
-# bring in all the new functions
 from src.model.model_building import (
     build_residual_pipeline,
     apply_residual_correction,
@@ -43,11 +36,9 @@ from src.model.data_processing import add_unified_features, validate_data
 
 from src.config import MODEL_DIR, FEATURE_COLUMNS, START_DATE, END_DATE, MODEL_PARAMS
 
-# Set the Python executables for Spark
 os.environ["PYSPARK_PYTHON"] = sys.executable
 os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 
-# Add project root to path to enable imports from src
 project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, project_root)
 sys.path.insert(0, os.path.join(project_root, "src"))
@@ -60,35 +51,27 @@ if src_path not in sys.path:
 logger = setup_logging(logging.INFO)
 
 
-def build_model_for_2024(spark):
+def build_model(spark):
     logger.info("Starting model training (2020-2025)...")
     try:
         save = input("Save raw data to db? (y/n): ").strip().lower()
 
-        # 1) Load & preprocess
         df = assemble_and_pass(spark, START_DATE, END_DATE, False, save, 'save', 'historical_2024')
-        
         df = add_unified_features(df).withColumn("is_future", lit(False))
 
-        # 2) Time‑based split into train / test
         splits = hybrid_time_validation(df)
         train_df, test_df = splits[0]  # Use first split for main training/testing
 
-        # 3) Build base pipeline
         base_pipe, feature_cols  = build_improved_model_pipeline()
         
-        # 4) Run Hybrid CV on untuned base pipeline
         # logger.info("Evaluating base pipeline with hybrid CV...")
         # base_cv_metrics = train_with_hybrid_cv(df, build_improved_model_pipeline)
         # logger.info(f"Baseline Hybrid CV metrics (untuned pipeline): {base_cv_metrics}")
 
-        # 6) Extract assembler and scaler for hyperopt reuse
         assembler_stage, scaler_stage = base_pipe.getStages()
 
-        # 7) Split into small train/val sets for Hyperopt
         train_small, val_small = train_df.randomSplit([0.9, 0.1], seed=42)
 
-        # 8) Hyperopt search for best GBT params
         best_params, trials, best_model, best_metrics = hyperopt_gbt(
             train_small,
             val_small,
@@ -99,7 +82,6 @@ def build_model_for_2024(spark):
         logger.info(f"Hyperopt returned: {best_params}")
         logger.info(f"Hyperopt returned: {best_metrics}")
 
-        # 9) Build final GBT regressor with best params
         gbt = GBTRegressor(
             labelCol="pm10",
             featuresCol="features",
@@ -112,49 +94,40 @@ def build_model_for_2024(spark):
         )
         full_pipeline = Pipeline(stages=[assembler_stage, scaler_stage, gbt])
 
-        # 10) Train tuned model
         model = train_model(full_pipeline, train_df)
 
-        # 11) Feature importance
         analyze_feature_importance(model, feature_cols)
 
-        # 13) Evaluate tuned model
         tuned_metrics = evaluate_model(model, test_df)
         logger.info(f"Base GBT metrics on test set: {tuned_metrics}")
 
-        # 14) Generate residuals for residual model training/evaluation
         test_df_with_residuals = model.transform(test_df).withColumn(
             "residual", 
-            F.col("pm10") - F.col("prediction")  # Calculate actual residuals
+            F.col("pm10") - F.col("prediction")
         )
         
-        # 12) Build and train residual-stacking model
         res_model = build_residual_pipeline(model, train_df, feature_cols)
 
-        # 16) Evaluate residual model predictions (now using residuals as labels)
         resid_metrics = evaluate_model(
             res_model, 
-            test_df_with_residuals,  # Use the DF with residuals
+            test_df_with_residuals,
             prediction_col="residual_prediction",
-            label_col="residual"  # Critical: evaluate against residuals
+            label_col="residual"
         )
         logger.info(f"Residual model metrics: {resid_metrics}")
 
-        # 17) Apply residual correction
         corrected_df = apply_residual_correction(model, res_model, test_df)
 
-        # 18) Plot findings
         plot_model_comparison(
         model, 
         res_model, 
         test_df, 
         corrected_df, 
-        tuned_metrics,  # Previously using 'base_metrics' which wasn't defined
-        resid_metrics,  # This was correct
-        feature_cols=FEATURE_COLUMNS  # Pass the feature columns for importance analysis
+        tuned_metrics,
+        resid_metrics,
+        feature_cols=FEATURE_COLUMNS
     )
         
-        # 19) Save both models
         gbt_path = save_model(model, model_name="pm10_gbt_model")
         resid_path = save_model(res_model, model_name="pm10_res_model")
         logger.info(f"Models saved:\n • GBT: {gbt_path}\n • Residual: {resid_path}")
@@ -269,7 +242,7 @@ def main():
         while True:
             choice = display_menu()
             if choice == "1":
-                build_model_for_2024(spark)
+                build_model(spark)
                 print("\nReturning to main menu...")
                 time.sleep(2)
             elif choice == "2":
@@ -298,7 +271,6 @@ def main():
         if spark:
             cleanup_resources(spark)
         sys.exit(0)
-
 
 if __name__ == "__main__":
     main()

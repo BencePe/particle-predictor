@@ -6,12 +6,9 @@ import os
 import logging
 import sys
 from datetime import datetime
-from src.config import LOG_DIR, SPARK_CONFIG  # Fixed import
+from src.config import LOG_DIR, SPARK_CONFIG
 
 def setup_logging(log_level=logging.INFO):
-    """
-    Set up logging configuration.
-    """
     os.makedirs(LOG_DIR, exist_ok=True)
     log_filename = os.path.join(LOG_DIR, f"pm10_prediction_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
     
@@ -29,20 +26,15 @@ def setup_logging(log_level=logging.INFO):
     return logger
 
 def create_spark_session(app_name=None, config_dict=None):
-    """
-    Create and configure a Spark session.
-    """
     from pyspark.sql import SparkSession
-    
-    # Set environment variables
+
     os.environ["JAVA_HOME"] = "C:\\Zulu\\zulu-21"
     os.environ["HADOOP_HOME"] = "C:\\hadoop"
     
     logger = logging.getLogger(__name__)
     logger.info("Initializing Spark session...")
     
-    # Use provided config or default from config.py
-    config_dict = config_dict or SPARK_CONFIG  # Use imported SPARK_CONFIG
+    config_dict = config_dict or SPARK_CONFIG
     app_name = app_name or config_dict.get("app_name", "PM10_Prediction")
     
     builder = SparkSession.builder.appName(app_name)
@@ -64,9 +56,6 @@ def create_spark_session(app_name=None, config_dict=None):
     return spark
 
 def get_runtime_stats(spark):
-    """
-    Get runtime statistics of Spark application.
-    """
     return {
         "applicationId": spark.sparkContext.applicationId,
         "num_executors": len(spark.sparkContext._jsc.sc().getExecutorMemoryStatus().keySet()),
@@ -75,9 +64,6 @@ def get_runtime_stats(spark):
     }
 
 def cleanup_resources(spark, temp_files=None):
-    """
-    Clean up resources when application is done.
-    """
     logger = logging.getLogger(__name__)
     
     if temp_files:
