@@ -6,17 +6,6 @@ import os
 
 
 def save_dataframe(df, name_prefix, mode="overwrite"):
-    """
-    Save a DataFrame as a Parquet file with timestamp.
-
-    Parameters:
-        df: Spark DataFrame to save.
-        name_prefix (str): Prefix for the filename.
-        mode (str): Write mode ("overwrite", "append", etc.)
-
-    Returns:
-        str: Path where the data was saved.
-    """
     if df is None:
         return None
 

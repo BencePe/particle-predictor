@@ -62,20 +62,17 @@ def train_model(pipeline, train_df):
     return model
 
 def evaluate_model(model, df, prediction_col="prediction", label_col="pm10", is_transformed=False):
-    if not is_transformed and model is not None:  # Added model existence check
+    if not is_transformed and model is not None:
         df = model.transform(df)
     
-    # Verify prediction column exists
     if prediction_col not in df.columns:
         available = "\n".join(df.columns)
         raise ValueError(f"Missing {prediction_col} column. Available columns:\n{available}")
 
-    # Verify label column exists
     if label_col not in df.columns:
         available = "\n".join(df.columns)
         raise ValueError(f"Missing {label_col} label column. Available columns:\n{available}")
 
-    # Create evaluators with dynamic label column
     evaluator_rmse = RegressionEvaluator(
         labelCol=label_col,
         predictionCol=prediction_col,
@@ -109,7 +106,6 @@ def load_model(model_path: str) -> PipelineModel:
     if not os.path.exists(model_path):
         logger.error(f"Model path does not exist: {model_path}")
         raise FileNotFoundError(f"No model at {model_path}")
-    # find subfolder with metadata/
     if os.path.isdir(os.path.join(model_path, "metadata")):
         real_path = model_path
     else:
@@ -122,9 +118,6 @@ def load_model(model_path: str) -> PipelineModel:
     return PipelineModel.load(real_path)
 
 def plot_predictions(predictions_df):
-    """
-    Enhanced version with date validation and better visual separation
-    """
     try:
         pdf = predictions_df.toPandas()
         pdf['datetime'] = pd.to_datetime(pdf['datetime'])
@@ -191,7 +184,6 @@ def analyze_feature_importance(model, feature_list=None, top_n=30):
         for i,(f,i_) in enumerate(pairs[:top_n], 1):
             logger.info(f"{i}. {f}: {i_:.4f}")
 
-        # plot
         plt.figure(figsize=(12,8))
         top_feats = pairs[:top_n]
         names, vals = zip(*top_feats)
@@ -214,28 +206,16 @@ def select_top_features(feature_importances, top_n=20):
     return top_feats
 
 def train_and_evaluate_cv(pipeline, splits):
-    """
-    Train model and evaluate on multiple train/test splits.
-    
-    Parameters:
-    -----------
-    pipeline : Pipeline
-        Spark ML pipeline to train
-    splits : list of tuples
-        List of (train_df, test_df) splits
-    """
     metrics_list = []
     for i, (train_df, test_df) in enumerate(splits, 1):
         logger.info(f"CV split {i}")
         model = train_model(pipeline, train_df)
 
-        # Transform test_df to get predictions
         pred_df = model.transform(test_df)
         if pred_df is None:
             logger.error(f"Model.transform returned None on CV split {i}")
             continue
         
-        # Evaluate on transformed data
         metrics = evaluate_model(model, pred_df, prediction_col="prediction")
         metrics_list.append(metrics)
 
@@ -251,22 +231,18 @@ def train_and_evaluate_cv(pipeline, splits):
 def train_with_hybrid_cv(df, pipeline_or_builder, datetime_col="datetime"):
     logger.info("Generating hybrid time-based validation splits...")
 
-    # Pre-partition for performance
     df = df.withColumn("year", F.year(F.col(datetime_col))) \
            .withColumn("month", F.month(F.col(datetime_col))) \
            .repartition(60, "year", "month") \
            .cache()
 
-    # Create splits
     splits = hybrid_time_validation(df, datetime_col=datetime_col)
 
-    # 🛠 Check if we received a callable (builder function) or an already-built pipeline
     if callable(pipeline_or_builder):
         pipeline, feats = pipeline_or_builder()
     else:
-        pipeline = pipeline_or_builder  # Already a Pipeline object
+        pipeline = pipeline_or_builder
 
-    # Run evaluation across splits
     avg_metrics, all_metrics = train_and_evaluate_cv(pipeline, splits)
     
     logger.info(f"Avg CV metrics: {avg_metrics}")
@@ -274,13 +250,10 @@ def train_with_hybrid_cv(df, pipeline_or_builder, datetime_col="datetime"):
     return avg_metrics
 
 def build_residual_pipeline(base_model, train_df, feature_cols):
-    # Get predictions from complete base model
     preds = base_model.transform(train_df)
     
-    # Calculate residuals using proper prediction column
     preds = preds.withColumn("residual", col("pm10") - col("prediction"))
     
-    # Build the pipeline as before
     assembler = VectorAssembler(
         inputCols=feature_cols,
         outputCol="res_assembled",
@@ -293,7 +266,6 @@ def build_residual_pipeline(base_model, train_df, feature_cols):
         withMean=True
     )
     
-    # Set a custom output column name for LinearRegression to avoid conflicts
     lr = LinearRegression(
         labelCol="residual",
         featuresCol="res_features",
@@ -308,13 +280,10 @@ def build_residual_pipeline(base_model, train_df, feature_cols):
     return res_model
 
 def apply_residual_correction(model, residual_model, df):
-    # Apply base model
     base_preds = model.transform(df).withColumnRenamed("prediction", "tuned_prediction")
     
-    # Apply residual model (will create "residual_prediction" column)
     corrected = residual_model.transform(base_preds)
     
-    # Calculate final prediction by adding base prediction + residual correction
     corrected = corrected.withColumn(
         "final_prediction", 
         col("tuned_prediction") + col("residual_prediction")
@@ -323,10 +292,8 @@ def apply_residual_correction(model, residual_model, df):
     return corrected
 
 def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
-    # Get feature names for targeted penalties
     feature_cols = assembler_stage.getInputCols()
     
-    # Add a variable to track the best model
     best_model = None
     best_metrics = None
     best_loss = float('inf')
@@ -337,7 +304,6 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
         if params["stepSize"] > 0.15 and params["maxDepth"] > 3:
             return {"loss": float("inf"), "status": STATUS_OK, "msg": "Too deep + too aggressive"}
 
-        # 1. Create GBT with modified colSampleRate to reduce feature dominance
         gbt = GBTRegressor(
             labelCol="pm10",
             featuresCol="features",
@@ -356,14 +322,11 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
         metrics = evaluate_model(model, val_df, prediction_col="prediction")
         val_rmse = metrics["rmse"]
 
-        # Get feature importances
         gbt_model_stage = model.stages[-1]
         importances = gbt_model_stage.featureImportances.toArray()
         
-        # Find 3h_pm10_avg importance if it exists
         pm10_avg_importance = 0
         try:
-            # Find index of 3h_pm10_avg in feature columns
             if "3h_pm10_avg" and "rolling_max_pm10_24h" in feature_cols:
                 idx = feature_cols.index("3h_pm10_avg")
                 idy = feature_cols.index("rolling_max_pm10_24h")
@@ -371,67 +334,49 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
                     pm10_avg_importance = importances[idx]
                     rolling_max_pm10_24h_importance = importances[idy]
         except:
-            pass  # If there's an error, we'll use max importance
+            pass
             
         max_importance = importances.max()
         
-        # Calculate feature distribution metrics
         std_importance = importances.std()
-        top_3_sum = np.sort(importances)[-3:].sum()  # Sum of top 3 feature importances
+        top_3_sum = np.sort(importances)[-3:].sum()
         
-        # 1. Imbalance penalty with progressive scaling - reduced weight
         imbalance_penalty = 0.0
-        if max_importance > 0.13:  # Adjusted threshold (was 0.10)
-            # Linear penalty with gentler scaling
-            imbalance_penalty = (max_importance - 0.15) * 20.0  # Reduced from 33.0 * (1.0 + max_importance)
-            
-        # 2.1 Progressive penalty for 3h_pm10_avg
+        if max_importance > 0.13:
+            imbalance_penalty = (max_importance - 0.15) * 20.0
         pm10_avg_penalty = 0.0
         if pm10_avg_importance > 0:
-            # Base penalty for any usage
             pm10_avg_penalty = 0.0
             
-            # Progressive penalty based on importance level
             if pm10_avg_importance > 0.15:
                 pm10_avg_penalty += (pm10_avg_importance - 0.05) * 10.0
         
-        # 2.2 Progressive penalty for 3h_pm10_avg
         rolling_max_pm10_24h_penalty = 0.0
         if rolling_max_pm10_24h_importance > 0:
-            # Base penalty for any usage
             rolling_max_pm10_24h_penalty = 0.0
             
-            # Progressive penalty based on importance level
             if rolling_max_pm10_24h_importance > 0.15:
                 rolling_max_pm10_24h_penalty += (rolling_max_pm10_24h_importance - 0.05) * 10.0
         
-        # 3. Penalty for having a few dominant features - reduced weight
         concentration_penalty = 0.0
         if top_3_sum > 0.6:
-            concentration_penalty = (top_3_sum - 0.6) * 7.0  # Reduced from 10.0
+            concentration_penalty = (top_3_sum - 0.6) * 7.0
             
-        # 4. Standard deviation penalty - reward more balanced distributions
-        distribution_penalty = std_importance * 14.0  # Reduced from 25.0
+        distribution_penalty = std_importance * 14.0
 
-        # 5. Complexity penalty - adjusted weights
         complexity_penalty = (
-            0.3 * int(params["maxDepth"]) +  # Reduced from 0.5
-            4.0 * (float(params["stepSize"]) ** 2) +  # Reduced from 5.5
-            1.5 * max(0, float(params["subsamplingRate"]) - 0.65)  # Relaxed threshold (was 0.7) and reduced weight
+            0.3 * int(params["maxDepth"]) +
+            4.0 * (float(params["stepSize"]) ** 2) +
+            1.5 * max(0, float(params["subsamplingRate"]) - 0.65)
         )
 
-        # Total penalty
         total_penalty = imbalance_penalty + complexity_penalty + rolling_max_pm10_24h_penalty +\
                         pm10_avg_penalty + concentration_penalty + distribution_penalty
                         
-        # Base loss
         base_loss = val_rmse + total_penalty
         
-        # Add scaled penalty for 3h_pm10_avg instead of hard rejection
         penalized_loss = base_loss
         if pm10_avg_importance > 0:
-            # Use a scaled penalty instead of flat 100
-            # Start with moderate penalty that increases with importance
             scaled_penalty = 3.0 + pm10_avg_importance * 50.0
             penalized_loss += scaled_penalty
             logger.info(f"  - Applied 3h_pm10_avg penalty: {scaled_penalty:.2f}")
@@ -441,14 +386,10 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
         logger.info(f"  - Penalties: imbalance={imbalance_penalty:.2f}, pm10_avg={pm10_avg_penalty:.2f}, " +
                     f"concentration={concentration_penalty:.2f}, distribution={distribution_penalty:.2f}")
         
-        # Modified best model selection logic
-        # Allow models with some 3h_pm10_avg usage if they're significantly better
         adjusted_loss = base_loss
         if pm10_avg_importance > 0:
-            # Add a modest fixed penalty to prefer non-3h_pm10_avg models
             adjusted_loss += 1 * pm10_avg_importance
         
-        # Update best model if better than current best
         if adjusted_loss < best_loss:
             best_loss = adjusted_loss
             best_model = model
@@ -470,7 +411,6 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
             }
             logger.info(f"New best model found! Adjusted Loss: {adjusted_loss:.4f}, RMSE: {val_rmse:.4f}")
             
-            # Special logging for models with exceptional RMSE
             if val_rmse < 2.3:
                 logger.info(f"Exceptional RMSE model! Params: {params}")
         
@@ -490,17 +430,15 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
             "params": params
         }
     
-    # Modified search space to focus on promising areas
     space = {
         "maxDepth": hp.choice("maxDepth", [3,4,5]),
         "maxIter": hp.choice("maxIter", [150, 170, 190]),
-        "stepSize": hp.uniform("stepSize", 0.1, 0.3),  # Narrower range
+        "stepSize": hp.uniform("stepSize", 0.1, 0.3),
         "maxBins": hp.choice("maxBins", [64, 100, 128]),
         "minInstancesPerNode": hp.choice("minInstancesPerNode", [5,8,10]),
-        "subsamplingRate": hp.uniform("subsamplingRate", 0.5, 0.75),  # Narrower range
+        "subsamplingRate": hp.uniform("subsamplingRate", 0.5, 0.75),
         "featureSubsetStrategy": hp.choice("featureSubsetStrategy", ["auto","sqrt", "onethird", "log2", "0.5"])
     }
-    # Run optimization
     trials = Trials()
     best = fmin(
         fn=objective,
@@ -510,7 +448,6 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
         trials=trials 
     )
     
-    # Map best params back to their original types/values
     featureSubsetStrategy_options = ["sqrt", "onethird", "log2", "0.5"]
     maxDepth_options = [3,4,5]
     maxIter_options = [150, 170, 190]
@@ -529,38 +466,30 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
     
     logger.info(f"Best hyperparameters: {best_params}")
     
-    # Analyze trials to understand feature importance trends
     logger.info("Analyzing feature importance trends across trials:")
     if trials.trials:
-        # Extract metrics from valid trials
         valid_trials = [t for t in trials.trials if 'result' in t and isinstance(t['result'], dict)]
         
         if valid_trials:
-            # Extract various metrics
             rmses = [t['result'].get('eval_rmse', float('inf')) for t in valid_trials]
             max_imps = [t['result'].get('max_feature_importance', 0) for t in valid_trials]
             pm10_imps = [t['result'].get('pm10_avg_importance', 0) for t in valid_trials]
             
-            # Count models without 3h_pm10_avg
             models_without_pm10_avg = sum(1 for imp in pm10_imps if imp == 0)
             
-            # Log statistics
             logger.info(f"  - RMSE range: {min(rmses):.4f} - {max(rmses):.4f}")
             logger.info(f"  - Max feature importance range: {min(max_imps):.4f} - {max(max_imps):.4f}")
             logger.info(f"  - 3h_pm10_avg importance range: {min(pm10_imps):.4f} - {max(pm10_imps):.4f}")
             logger.info(f"  - Models without 3h_pm10_avg: {models_without_pm10_avg}/{len(valid_trials)}")
             
-            # Find best RMSE model and report if it uses 3h_pm10_avg
             best_rmse_idx = np.argmin(rmses)
             best_rmse = rmses[best_rmse_idx]
             best_rmse_uses_pm10 = pm10_imps[best_rmse_idx] > 0
             logger.info(f"  - Best RMSE model: {best_rmse:.4f} (uses 3h_pm10_avg: {best_rmse_uses_pm10})")
     
-    # Save the best model if one was found
     if best_model is not None:
         logger.info(f"Retraining best model on full train set with best hyperparameters...")
 
-        # ⚡ Rebuild best GBT model for full data training
         best_gbt = GBTRegressor(
             labelCol="pm10",
             featuresCol="features",
@@ -576,14 +505,11 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
 
         full_pipeline = Pipeline(stages=[assembler_stage, scaler_stage, best_gbt])
 
-        # Retrain fully
         full_model = full_pipeline.fit(train_df)
 
-        # Save it
         model_path = save_model(full_model, model_name="pm10_gbt_best_hyperopt")
         logger.info(f"Full retrained best model saved to: {model_path}")
         
-        # Return this full model now
         return best_params, trials, full_model, best_metrics
 
     else:
@@ -592,45 +518,31 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
 
 
 def plot_model_comparison(model, res_model, test_df, corrected_df, base_metrics, resid_metrics, feature_cols=None):
-    """
-    Create and save visualization comparing base and residual-stacked models
-    using real model predictions on test_df.
-    """
-
     logger.info("Generating prediction plots...")
 
-    # Step 1: Prepare data
-    # Transform test data with base model - prediction column will be named "prediction"
     base_preds = model.transform(test_df).select("datetime", "pm10", "prediction").toPandas()
     
-    # Use the final_prediction column from corrected dataframe
     corrected_preds = corrected_df.select("datetime", "pm10", "final_prediction").toPandas()
 
     base_preds['datetime'] = pd.to_datetime(base_preds['datetime'])
     corrected_preds['datetime'] = pd.to_datetime(corrected_preds['datetime'])
 
-    # Merge datasets on datetime
     merged = base_preds.merge(corrected_preds[['datetime', 'final_prediction']], on='datetime', how='inner')
     merged = merged.sort_values('datetime')
 
-    # Step 2: Prepare residual predictions separately if needed
     try:
         residual_preds = res_model.transform(test_df).select("datetime", "residual_prediction").toPandas()
         residual_preds['datetime'] = pd.to_datetime(residual_preds['datetime'])
-        # Could merge this with merged dataframe if needed for additional plots
     except Exception as e:
         logger.warning(f"Could not extract residual predictions: {e}")
         residual_preds = None
 
-    # Step 3: Extract feature importance if possible
     feature_importance = {}
     try:
-        # Check if the model is a PipelineModel and get the GBT stage
         if isinstance(model, PipelineModel):
-            # The GBT is likely the last stage
             gbt = model.stages[-1]
         else:
-            gbt = model  # Use the model directly if it's not a pipeline
+            gbt = model
             
         importances = gbt.featureImportances.toArray()
         
@@ -641,12 +553,10 @@ def plot_model_comparison(model, res_model, test_df, corrected_df, base_metrics,
     except Exception as e:
         logger.warning(f"Feature importance extraction error: {e}")
 
-    # Step 4: Create the figure with GridSpec
     plt.style.use('seaborn-v0_8-whitegrid')
     fig = plt.figure(figsize=(18, 12))
     gs = GridSpec(2, 2, figure=fig)
 
-    # --- 1. Performance Metrics ---
     ax1 = fig.add_subplot(gs[0, 0])
     metrics = ['RMSE', 'MAE', 'R²']
     base_values = [base_metrics['rmse'], base_metrics['mae'], base_metrics['r2']]
@@ -661,7 +571,6 @@ def plot_model_comparison(model, res_model, test_df, corrected_df, base_metrics,
     ax1.legend()
     ax1.grid(True)
 
-    # --- 2. Time Series ---
     ax2 = fig.add_subplot(gs[0, 1])
     ax2.plot(merged['datetime'], merged['pm10'], label="Actual PM10", color="black", linewidth=2)
     ax2.plot(merged['datetime'], merged['prediction'], label="Base GBT", linestyle="--", color="blue")
@@ -670,21 +579,18 @@ def plot_model_comparison(model, res_model, test_df, corrected_df, base_metrics,
     ax2.legend()
     ax2.grid(True)
 
-    # --- 3. Feature Importance ---
     feature_cols = [c for c in FEATURE_COLUMNS if c != "pm10"]
     ax3 = fig.add_subplot(gs[1, 0])
     if feature_importance:
-        # Sort features by importance and get top 20 (or fewer if less available)
         sorted_features = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)
         top_n = min(20, len(sorted_features))
         names, scores = zip(*sorted_features[:top_n])
         
-        # Plot horizontal bars (reversed to show most important at top)
         y_pos = range(len(names))
         ax3.barh(y_pos, scores, color="#6A5ACD")
         ax3.set_yticks(y_pos)
         ax3.set_yticklabels(names)
-        ax3.invert_yaxis()  # Most important at the top
+        ax3.invert_yaxis()
         ax3.set_title(f"Feature Importance (Top {top_n})")
     else:
         ax3.text(0.5, 0.5, "Feature importance not available", 
@@ -692,7 +598,6 @@ def plot_model_comparison(model, res_model, test_df, corrected_df, base_metrics,
                  transform=ax3.transAxes)
     ax3.grid(True)
 
-    # --- 4. Residual Distribution ---
     ax4 = fig.add_subplot(gs[1, 1])
     base_errors = merged['pm10'] - merged['prediction']
     corrected_errors = merged['pm10'] - merged['final_prediction']
@@ -714,5 +619,4 @@ def plot_model_comparison(model, res_model, test_df, corrected_df, base_metrics,
     plt.savefig(output_path, dpi=300)
     logger.info(f"Model comparison plot saved to {output_path}")
     
-    # Show the plot if in an interactive environment
     plt.show()

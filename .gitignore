@@ -10,7 +10,7 @@ __pycache__/
 
 # Distribution / packaging
 
-
+.src/config.py
 .Python
 tests/
 build/

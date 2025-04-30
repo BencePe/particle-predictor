@@ -9,20 +9,6 @@ from pyspark.sql.functions import lit
 logger = logging.getLogger(__name__)
 
 def assemble_dataframe(spark, df_list, join_key="datetime", how="inner", extra_columns=None, deduplicate=True):
-    """
-    Assemble a merged Spark DataFrame from a list of Pandas DataFrames.
-
-    Parameters:
-        spark: SparkSession object.
-        df_list (list): List of Pandas DataFrames to merge.
-        join_key (str): Column name to join on (default "datetime").
-        how (str): Merge type, e.g., "inner", "left" (default "inner").
-        extra_columns (dict): A dictionary of {column_name: value} to add as extra columns.
-        deduplicate (bool): If True, drop duplicates on the join key.
-
-    Returns:
-        Spark DataFrame: The merged and enriched DataFrame.
-    """
     if not df_list or len(df_list) < 1:
         logger.error("No dataframes provided for assembly.")
         return None

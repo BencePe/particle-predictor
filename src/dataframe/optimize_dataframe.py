@@ -2,19 +2,6 @@ from pyspark import StorageLevel
 
 
 def optimize_dataframe(df, partition_cols=None, partition_count=None, cache=True, storage_level=StorageLevel.MEMORY_AND_DISK):
-    """
-    Optimize a Spark DataFrame for performance.
-
-    Parameters:
-        df: Spark DataFrame to optimize.
-        partition_cols (list or str): Column(s) to partition by.
-        partition_count (int): Number of partitions.
-        cache (bool): Whether to cache the DataFrame.
-        storage_level: PySpark StorageLevel to use if caching.
-
-    Returns:
-        Spark DataFrame: Optimized DataFrame.
-    """
     if df is None:
         return None
 

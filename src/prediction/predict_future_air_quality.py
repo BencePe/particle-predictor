@@ -16,7 +16,7 @@ from src.config import FEATURE_COLUMNS, DEBRECEN_ELEVATION
 def predict_future_air_quality(spark: SparkSession, model: PipelineModel, residual_model: PipelineModel = None): 
     try:
         spark.conf.set("spark.sql.debug.maxToStringFields", 1000)
-        hist_df, future_df = get_prediction_input_data(spark)
+        hist_df, future_df, now = get_prediction_input_data(spark)
 
         hist_df = add_unified_features(hist_df)
 
@@ -24,18 +24,15 @@ def predict_future_air_quality(spark: SparkSession, model: PipelineModel, residu
             logger.error("No historical data available for prediction.")
             return None
 
-        # 1) ensure we only forecast *after* our last observed time
         last_dt = hist_df.agg(spark_max("datetime")).first()[0]
         logger.info("Last historical datetime: %s", last_dt)
         
-        # Log the original future weather data range
         future_min = future_df.agg(spark_min("datetime")).first()[0]
         future_max = future_df.agg(spark_max("datetime")).first()[0]
         logger.info("Original future weather range: %s to %s", 
                    future_min.strftime('%Y-%m-%d %H:%M'), 
                    future_max.strftime('%Y-%m-%d %H:%M'))
         
-        # Log filtered range    
         if not future_df.rdd.isEmpty():
             filtered_min = future_df.agg(spark_min("datetime")).first()[0]
             filtered_max = future_df.agg(spark_max("datetime")).first()[0]
@@ -43,7 +40,6 @@ def predict_future_air_quality(spark: SparkSession, model: PipelineModel, residu
                        filtered_min.strftime('%Y-%m-%d %H:%M'), 
                        filtered_max.strftime('%Y-%m-%d %H:%M'))
             
-            # Check if we have enough data
             days_available = (filtered_max - filtered_min).days + 1
             logger.info("Days available for forecast: %d", days_available)
             
@@ -53,12 +49,9 @@ def predict_future_air_quality(spark: SparkSession, model: PipelineModel, residu
             logger.error("No future weather data available after filtering.")
             return None
 
-        # 2) generate recursive forecasts
         preds_df = recursive_pm10_forecast(
     spark, model, hist_df, future_df, periods=7*24, residual_model=residual_model, base_time=last_dt)
 
-        # 3) assemble history-only and forecast-only DataFrames
-        # history-only: no prediction column
         hist_only = (
             hist_df
             .select(
@@ -69,7 +62,6 @@ def predict_future_air_quality(spark: SparkSession, model: PipelineModel, residu
             )
         )
 
-        # forecast-only: rename pm10 to prediction
         pred_only = (
             preds_df
             .select(
@@ -80,10 +72,8 @@ def predict_future_air_quality(spark: SparkSession, model: PipelineModel, residu
             )
         )
 
-        # union and order
         result = hist_only.unionByName(pred_only).orderBy("datetime")
 
-        # 4) logging ranges
         hist_range_min = hist_df.agg(spark_min("datetime")).first()[0]
         hist_range_max = hist_df.agg(spark_max("datetime")).first()[0]
         pred_range_min = preds_df.agg(spark_min("datetime")).first()[0]
@@ -100,7 +90,6 @@ def predict_future_air_quality(spark: SparkSession, model: PipelineModel, residu
             pred_range_max.strftime('%Y-%m-%d')
         )
 
-        # 5) plot and return
         plot_predictions(result)
         return result
 
@@ -128,20 +117,16 @@ def recursive_pm10_forecast(
     if "precipitation" not in hist_pd.columns:
         hist_pd["precipitation"] = 0.0
 
-    # Determine split point: last datetime in historical
     last_hist_time = hist_pd["datetime"].max()
 
-    # Separate future overlap (patch) vs true future forecast
     future_patch = future_pd[future_pd["datetime"] <= last_hist_time]
     future_forecast = future_pd[future_pd["datetime"] >= last_hist_time]
 
-    # Build buffers
     pm10_buffer = hist_pd["pm10"].iloc[-168:].tolist()
     pressure_buffer = hist_pd["pressure"].iloc[-168:].tolist()
     wind_buffer = hist_pd["wind_speed"].iloc[-168:].tolist()
     temp_buffer = hist_pd["temperature"].iloc[-168:].tolist()
 
-    # Historical bounds
     hist_min = max(0, hist_pd["pm10"].min() * 0.5)
     hist_max = hist_pd["pm10"].max() * 1.5
 
@@ -155,9 +140,6 @@ def recursive_pm10_forecast(
         return func(window_values) if window_values else np.nan
 
     def predict_single_point(feat_dict, dt):
-        """
-        Predict a single timestep with optional residual correction
-        """
         single_row_df = pd.DataFrame([feat_dict])
         feature_cols = [c for c in single_row_df.columns if c in FEATURE_COLUMNS]
         single_sdf = spark.createDataFrame(single_row_df)
@@ -236,15 +218,13 @@ def recursive_pm10_forecast(
             "temp_diff_24h": temp - buffer_lag(temp_buffer, 24)
         }
         return feat
-    # --- Phase 1: Fill missing (patched) history ---
     for i in range(len(future_patch)):
         row = future_patch.iloc[i]
         dt = row["datetime"]
-        feat = build_features(dt, row["temperature"], row["humidity"], row["pressure"], row["wind_speed"], row["precipitation"], np.nan)
+        feat = build_features(dt, row["temperature"], row["humidity"], row["pressure"], row["wind_speed"], row["precipitation"], row["pm10"])
         pred = predict_single_point(feat, dt)
         forecasts.append({"datetime": dt, "pm10": pred, "is_future": False})
 
-        # Update buffers
         pm10_buffer.append(pred)
         pressure_buffer.append(row["pressure"])
         wind_buffer.append(row["wind_speed"])
@@ -254,10 +234,8 @@ def recursive_pm10_forecast(
         wind_buffer = wind_buffer[-168:]
         temp_buffer = temp_buffer[-168:]
 
-        # Update hist_pd for dry_spell/rain checks
         hist_pd = pd.concat([hist_pd, pd.DataFrame({"datetime": [dt], "precipitation": [row["precipitation"]]})], ignore_index=True).iloc[-168:]
 
-    # --- Phase 2: True recursive future forecast ---
     for i in range(min(periods, len(future_forecast))):
         row = future_forecast.iloc[i]
         dt = row["datetime"]
@@ -265,7 +243,6 @@ def recursive_pm10_forecast(
         pred = predict_single_point(feat, dt)
         forecasts.append({"datetime": dt, "pm10": pred, "is_future": True})
 
-        # Update buffers
         pm10_buffer.append(pred)
         pressure_buffer.append(row["pressure"])
         wind_buffer.append(row["wind_speed"])
@@ -278,5 +255,4 @@ def recursive_pm10_forecast(
         
         hist_pd = pd.concat([hist_pd, pd.DataFrame({"datetime": [dt], "precipitation": [row["precipitation"]]})], ignore_index=True).iloc[-168:]
 
-    # --- Return full forecast DataFrame ---
     return spark.createDataFrame(pd.DataFrame(forecasts))

@@ -12,7 +12,6 @@ DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
 LOG_DIR = os.path.join(PROJECT_ROOT, "logs")
 
-# Create directories if they don't exist
 for directory in [DATA_DIR, MODEL_DIR, LOG_DIR]:
     os.makedirs(directory, exist_ok=True)
 
@@ -47,9 +46,6 @@ THINGSPEAK_KEYS = {
 }
 
 OW_API_KEY = os.getenv("OW_API_KEY", "83d50870977893b61ac48149455cf65a")
-
-# === API request limit ===
-API_REQUEST_LIMIT = 3000
 
 # === Spark configuration ===
 SPARK_CONFIG = {
@@ -114,64 +110,3 @@ FEATURE_COLUMNS = [
     "stagnation_index", "heating_effect", "dry_spell_days"
     
 ]
-
-# === Feature columns ===
-# FEATURE_COLUMNS = [
-#     # Core measurements
-#     "pm10","temperature","humidity","pressure",
-#     "wind_speed","wind_dir","elevation","is_urban",
-
-#     # Temporal & cyclical
-#     "month","hour","is_weekend","is_rush_hour",
-#     "hour_sin","hour_cos","month_sin","month_cos",
-#     "day_of_year_sin","day_of_year_cos","hour_weekend",
-#     "spring_indicator","summer_indicator","fall_indicator","winter_indicator",
-
-#     # Lags
-#     "pm10_lag3","pm10_lag6","pm10_lag12","pm10_lag24","pm10_lag48",
-#     "pm10_lag72","pm10_lag168",
-
-#     # Rolling stats
-#     "3h_pm10_avg","6h_pm10_avg","12h_pm10_avg","24h_pm10_avg",
-#     "48h_pm10_avg","72h_pm10_avg","weekly_pm10_avg",
-#     "3h_pm10_std","6h_pm10_std","12h_pm10_std","24h_pm10_std","weekly_pm10_std",
-#     "3h_temp_avg","12h_temp_avg","3h_humidity_avg","12h_humidity_avg",
-#     "3h_pressure_avg","12h_pressure_avg","3h_wind_speed_avg","12h_wind_speed_avg",
-
-#     # Volatility & diffs
-#     "pm10_volatility_3h","pm10_volatility_6h","pm10_volatility_12h","pm10_volatility_24h",
-#     "pm10_diff_3h","pm10_diff_6h","pm10_diff_12h","pm10_diff_24h","pm10_diff_48h",
-#     "pm10_acceleration_3h","pm10_acceleration_12h","pm10_acceleration",
-#     "pm10_rate_of_change_3h","pm10_rate_of_change_12h",
-
-#     # Precipitation
-#     "is_precipitation","precipitation_intensity","recent_rain",
-#     "rain_last_6h","rain_last_12h","rain_last_24h","cumulative_24h_precip",
-
-#     # Interaction & trends
-#     "pressure_3h_trend","pressure_6h_trend","pressure_12h_trend","pressure_24h_trend",
-#     "temp_3h_trend","temp_6h_trend","temp_12h_trend","temp_24h_trend",
-#     "humidity_3h_trend","humidity_12h_trend",
-#     "humidity_temp_index","humidity_pressure_index","temp_wind_index",
-#     "pressure_change_velocity","rapid_pressure_change","rapid_humidity_increase",
-#     "temp_humidity_interaction","temp_pressure_interaction","wind_temp_cross",
-#     "wind_speed_humidity","temp_pressure","dew_point","pm10_dew_point","pollution_drift_week",
-
-#     # Weather system changes
-#     "weather_change_index","atmospheric_instability","weather_system_change",
-
-#     # Wind stability
-#     "wind_dir_stability","wind_dir_8","wind_speed_cat",
-
-#     # Pollution ratios/load
-#     "pollution_load","pm10_12h_avg_sq","avg12h_times_diff12h",
-
-#     # Future flag
-#     "is_future",
-    
-#     # Weather lag features
-#     "temp_lag3", "temp_lag6", "temp_lag12", "temp_lag24",
-#     "humidity_lag3", "humidity_lag6", "humidity_lag12", "humidity_lag24",
-#     "pressure_lag3", "pressure_lag6", "pressure_lag12", "pressure_lag24",
-#     "wind_speed_lag3", "wind_speed_lag6", "wind_speed_lag12", "wind_speed_lag24"
-# ]
