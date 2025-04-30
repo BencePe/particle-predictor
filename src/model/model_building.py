@@ -492,13 +492,13 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
     
     # Modified search space to focus on promising areas
     space = {
-        "maxDepth": hp.choice("maxDepth", [4,5,6]),  # Focus on smaller trees
+        "maxDepth": hp.choice("maxDepth", [3,4,5]),
         "maxIter": hp.choice("maxIter", [150, 170, 190]),
-        "stepSize": hp.uniform("stepSize", 0.25, 0.5),  # Narrower range
-        "maxBins": hp.choice("maxBins", [100, 120, 140]),
+        "stepSize": hp.uniform("stepSize", 0.1, 0.3),  # Narrower range
+        "maxBins": hp.choice("maxBins", [64, 100, 128]),
         "minInstancesPerNode": hp.choice("minInstancesPerNode", [5,8,10]),
-        "subsamplingRate": hp.uniform("subsamplingRate", 0.65, 0.75),  # Narrower range
-        "featureSubsetStrategy": hp.choice("featureSubsetStrategy", ["log2", "onethird"])
+        "subsamplingRate": hp.uniform("subsamplingRate", 0.5, 0.75),  # Narrower range
+        "featureSubsetStrategy": hp.choice("featureSubsetStrategy", ["auto","sqrt", "onethird", "log2", "0.5"])
     }
     # Run optimization
     trials = Trials()
@@ -507,12 +507,12 @@ def hyperopt_gbt(train_df, val_df, assembler_stage, scaler_stage, max_evals=30):
         space=space,
         algo=tpe.suggest,
         max_evals=max_evals,
-        trials=trials
+        trials=trials 
     )
     
     # Map best params back to their original types/values
-    featureSubsetStrategy_options = ["log2", "onethird"]
-    maxDepth_options = [4,5,6]
+    featureSubsetStrategy_options = ["sqrt", "onethird", "log2", "0.5"]
+    maxDepth_options = [3,4,5]
     maxIter_options = [150, 170, 190]
     maxBins_options = [100, 120, 140]
     minInstancesPerNode_options = [5,8,10]

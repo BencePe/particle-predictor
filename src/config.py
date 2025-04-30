@@ -99,6 +99,9 @@ FEATURE_COLUMNS = [
     "3h_wind_speed_avg", "24h_wind_speed_avg",
     "rolling_max_pm10_24h", "rolling_min_pm10_24h",
 
+    # Weather features
+    "3h_wind_speed_avg", "24h_wind_speed_avg",
+
     # Weather and air quality interactions
     "pm10_volatility_3h", "pm10_diff_3h", "pm10_diff_12h", "pm10_diff_24h", 
 

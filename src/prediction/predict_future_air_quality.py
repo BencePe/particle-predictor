@@ -3,6 +3,7 @@ import numpy as np
 
 from src.fetching.data_fetching import get_prediction_input_data, logger
 from src.model.model_building import plot_predictions
+from src.model.data_processing import add_unified_features, validate_data
 
 
 from pyspark.ml import PipelineModel
@@ -15,7 +16,9 @@ from src.config import FEATURE_COLUMNS, DEBRECEN_ELEVATION
 def predict_future_air_quality(spark: SparkSession, model: PipelineModel, residual_model: PipelineModel = None): 
     try:
         spark.conf.set("spark.sql.debug.maxToStringFields", 1000)
-        hist_df, future_w = get_prediction_input_data(spark)
+        hist_df, future_df = get_prediction_input_data(spark)
+
+        hist_df = add_unified_features(hist_df)
 
         if hist_df is None or hist_df.rdd.isEmpty():
             logger.error("No historical data available for prediction.")
@@ -26,19 +29,16 @@ def predict_future_air_quality(spark: SparkSession, model: PipelineModel, residu
         logger.info("Last historical datetime: %s", last_dt)
         
         # Log the original future weather data range
-        future_min = future_w.agg(spark_min("datetime")).first()[0]
-        future_max = future_w.agg(spark_max("datetime")).first()[0]
+        future_min = future_df.agg(spark_min("datetime")).first()[0]
+        future_max = future_df.agg(spark_max("datetime")).first()[0]
         logger.info("Original future weather range: %s to %s", 
                    future_min.strftime('%Y-%m-%d %H:%M'), 
                    future_max.strftime('%Y-%m-%d %H:%M'))
         
-        # Filter but ensure we include at least 14 days worth of data
-        future_w = future_w.filter(col("datetime") >= last_dt)
-        
         # Log filtered range    
-        if not future_w.rdd.isEmpty():
-            filtered_min = future_w.agg(spark_min("datetime")).first()[0]
-            filtered_max = future_w.agg(spark_max("datetime")).first()[0]
+        if not future_df.rdd.isEmpty():
+            filtered_min = future_df.agg(spark_min("datetime")).first()[0]
+            filtered_max = future_df.agg(spark_max("datetime")).first()[0]
             logger.info("Filtered future weather range: %s to %s", 
                        filtered_min.strftime('%Y-%m-%d %H:%M'), 
                        filtered_max.strftime('%Y-%m-%d %H:%M'))
@@ -55,7 +55,7 @@ def predict_future_air_quality(spark: SparkSession, model: PipelineModel, residu
 
         # 2) generate recursive forecasts
         preds_df = recursive_pm10_forecast(
-    spark, model, hist_df, future_w, periods=7*24, residual_model=residual_model, base_time=last_dt)
+    spark, model, hist_df, future_df, periods=7*24, residual_model=residual_model, base_time=last_dt)
 
         # 3) assemble history-only and forecast-only DataFrames
         # history-only: no prediction column
@@ -136,10 +136,10 @@ def recursive_pm10_forecast(
     future_forecast = future_pd[future_pd["datetime"] >= last_hist_time]
 
     # Build buffers
-    pm10_buffer = hist_pd["pm10"].iloc[-96:].tolist()
-    pressure_buffer = hist_pd["pressure"].iloc[-96:].tolist()
-    wind_buffer = hist_pd["wind_speed"].iloc[-96:].tolist()
-    temp_buffer = hist_pd["temperature"].iloc[-96:].tolist()
+    pm10_buffer = hist_pd["pm10"].iloc[-168:].tolist()
+    pressure_buffer = hist_pd["pressure"].iloc[-168:].tolist()
+    wind_buffer = hist_pd["wind_speed"].iloc[-168:].tolist()
+    temp_buffer = hist_pd["temperature"].iloc[-168:].tolist()
 
     # Historical bounds
     hist_min = max(0, hist_pd["pm10"].min() * 0.5)
@@ -199,19 +199,29 @@ def recursive_pm10_forecast(
             "precipitation": precip,
             "hour_sin": np.sin(2 * np.pi * dt.hour / 24.0),
             "hour_cos": np.cos(2 * np.pi * dt.hour / 24.0),
+            "week_sin": np.sin(2 * np.pi * dt.dayofweek / 24.0),
+            "week_cos": np.cos(2 * np.pi * dt.dayofweek / 24.0),
             "month_sin": np.sin(2 * np.pi * dt.month / 12.0),
+            "month_cos": np.cos(2 * np.pi * dt.month / 12.0),
             "winter_indicator": int(dt.month == 12 or dt.month <= 2),
+            "spring_indicator": int(dt.month == 3 or dt.month <= 6),
+            "summer_indicator": int(dt.month == 6 or dt.month <= 9),
+            "fall_indicator": int(dt.month == 9 or dt.month <= 2),
             "pm10_lag3": buffer_lag(pm10_buffer, 3),
+            "pm10_lag12": buffer_lag(pm10_buffer, 12),
             "pm10_lag24": buffer_lag(pm10_buffer, 24),
             "pm10_lag168": buffer_lag(pm10_buffer, 168),
             "3h_pm10_avg": buffer_roll(pm10_buffer, 3, np.mean),
             "3h_pm10_std": buffer_roll(pm10_buffer, 3, np.std),
+            "24h_pm10_avg": buffer_roll(pm10_buffer, 24, np.mean),
             "24h_pm10_std": buffer_roll(pm10_buffer, 24, np.std),
+            "3h_pressure_avg": buffer_roll(pressure_buffer, 24, np.mean),
             "rolling_max_pm10_24h": buffer_roll(pm10_buffer, 24, np.max),
             "rolling_min_pm10_24h": buffer_roll(pm10_buffer, 24, np.min),
             "3h_wind_speed_avg": buffer_roll(wind_buffer, 3, np.mean),
             "24h_wind_speed_avg": buffer_roll(wind_buffer, 24, np.mean),
             "pm10_diff_3h": last_pm10 - buffer_lag(pm10_buffer, 3) if not np.isnan(buffer_lag(pm10_buffer, 3)) else 0.0,
+            "pm10_diff_12h": last_pm10 - buffer_lag(pm10_buffer, 12) if not np.isnan(buffer_lag(pm10_buffer, 12)) else 0.0,
             "pm10_diff_24h": last_pm10 - buffer_lag(pm10_buffer, 24) if not np.isnan(buffer_lag(pm10_buffer, 24)) else 0.0,
             "pm10_volatility_3h": buffer_roll(pm10_buffer, 3, np.std) / (buffer_roll(pm10_buffer, 3, np.mean) + 1e-5),
             "is_precipitation": int(precip > 0.1),
@@ -220,6 +230,10 @@ def recursive_pm10_forecast(
             "stagnation_index": int(wind < 2.5 and abs(pres - prev_pressure) < 1.0 and hum > 70),
             "heating_effect": int((dt.month == 12 or dt.month <= 2) and temp < 2 and hum > 80),
             "dry_spell_days": int(dry_spell_days),
+            "temp_24h_trend": buffer_lag(temp_buffer, 24) - temp,
+            "pollution_load": last_pm10 * wind,
+            "temp_lag24": buffer_lag(temp_buffer, 24),
+            "temp_diff_24h": temp - buffer_lag(temp_buffer, 24)
         }
         return feat
     # --- Phase 1: Fill missing (patched) history ---
@@ -234,10 +248,11 @@ def recursive_pm10_forecast(
         pm10_buffer.append(pred)
         pressure_buffer.append(row["pressure"])
         wind_buffer.append(row["wind_speed"])
-        pm10_buffer = pm10_buffer[-96:]
-        pressure_buffer = pressure_buffer[-96:]
-        wind_buffer = wind_buffer[-96:]
-        temp_buffer = temp_buffer[-96:]
+        temp_buffer.append(row["temperature"])
+        pm10_buffer = pm10_buffer[-168:]
+        pressure_buffer = pressure_buffer[-168:]
+        wind_buffer = wind_buffer[-168:]
+        temp_buffer = temp_buffer[-168:]
 
         # Update hist_pd for dry_spell/rain checks
         hist_pd = pd.concat([hist_pd, pd.DataFrame({"datetime": [dt], "precipitation": [row["precipitation"]]})], ignore_index=True).iloc[-168:]
@@ -254,10 +269,13 @@ def recursive_pm10_forecast(
         pm10_buffer.append(pred)
         pressure_buffer.append(row["pressure"])
         wind_buffer.append(row["wind_speed"])
-        pm10_buffer = pm10_buffer[-96:]
-        pressure_buffer = pressure_buffer[-96:]
-        wind_buffer = wind_buffer[-96:]
-
+        temp_buffer.append(row["temperature"])
+        
+        pm10_buffer = pm10_buffer[-168:]
+        pressure_buffer = pressure_buffer[-168:]
+        wind_buffer = wind_buffer[-168:]
+        temp_buffer = temp_buffer[-168:]
+        
         hist_pd = pd.concat([hist_pd, pd.DataFrame({"datetime": [dt], "precipitation": [row["precipitation"]]})], ignore_index=True).iloc[-168:]
 
     # --- Return full forecast DataFrame ---

@@ -94,7 +94,7 @@ def build_model_for_2024(spark):
             val_small,
             assembler_stage,
             scaler_stage,
-            max_evals=10,
+            max_evals=200,
         )
         logger.info(f"Hyperopt returned: {best_params}")
         logger.info(f"Hyperopt returned: {best_metrics}")
