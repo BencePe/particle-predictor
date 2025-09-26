@@ -16,7 +16,7 @@ from pyspark.ml import Pipeline
 from pyspark.ml.regression import GBTRegressor
 from src.prediction.predict_future_air_quality import predict_future_air_quality
 from src.db.db_operations import check_db_ready, execute_db_query
-from src.utils import setup_logging, create_spark_session, cleanup_resources
+from src.utils.utils import setup_logging, create_spark_session, cleanup_resources
 from src.fetching.data_fetching import assemble_and_pass, fetch_current_data
 from src.model.model_building import (
     build_residual_pipeline,
