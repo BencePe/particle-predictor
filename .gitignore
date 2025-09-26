@@ -191,3 +191,4 @@ data.db
 
 # Ignore CSV files
 *.csv
+src/config.py
